@@ -57,7 +57,7 @@ https://bekord.com, https://www.bekord.com {
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
         Cross-Origin-Opener-Policy "same-origin"
         Cross-Origin-Resource-Policy "same-site"
-        Cross-Origin-Embedder-Policy "require-corp"
+        Cross-Origin-Embedder-Policy "credentialless"
         Content-Security-Policy "default-src 'self'; img-src 'self' data: https://1a-1791.com blob:; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' wss://bekord.com wss://www.bekord.com https://bekord.com https://www.bekord.com"
         Access-Control-Allow-Origin https://{host}
         Access-Control-Allow-Credentials true
