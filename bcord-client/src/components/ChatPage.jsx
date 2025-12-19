@@ -2160,7 +2160,7 @@ export default function ChatPage() {
               background: '#1e293b',
               borderRadius: '12px',
               padding: '24px',
-              width: '500px',
+              width: '480px',
               maxHeight: '80vh',
               overflow: 'auto',
               boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
@@ -2175,134 +2175,140 @@ export default function ChatPage() {
             </div>
             
             <p style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '16px' }}>
-              Add up to 10 Rumble channels. Just paste a Rumble URL and it auto-detects the type!
+              Add up to 10 Rumble channels. Paste a Rumble URL to auto-detect!
             </p>
             
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
               {rumbleChannels.map((channel, index) => (
                 <div key={index} style={{ 
-                  display: 'flex', 
-                  gap: '8px', 
-                  alignItems: 'center',
                   background: '#0f172a',
                   padding: '12px',
                   borderRadius: '8px'
                 }}>
-                  <span style={{ color: '#64748b', fontSize: '12px', width: '20px' }}>{index + 1}.</span>
-                  <select
-                    value={channel.type}
-                    onChange={(e) => {
-                      const updated = [...rumbleChannels];
-                      updated[index] = { ...channel, type: e.target.value };
-                      if (e.target.value === 'channel') {
-                        delete updated[index].url;
-                      }
-                      setRumbleChannels(updated);
-                    }}
-                    style={{
-                      background: '#334155',
-                      border: 'none',
-                      borderRadius: '4px',
-                      color: '#e2e8f0',
-                      padding: '6px 8px',
-                      fontSize: '12px',
-                      width: '100px'
-                    }}
-                  >
-                    <option value="channel">Channel</option>
-                    <option value="livestream">Livestream</option>
-                  </select>
-                  <input
-                    type="text"
-                    value={channel.id}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      const updated = [...rumbleChannels];
-                      // Auto-detect if user pastes a Rumble URL
-                      if (val.includes('rumble.com/c/')) {
-                        // Channel URL: https://rumble.com/c/SaltyCracker
-                        const match = val.match(/rumble\.com\/c\/([^\/?]+)/);
-                        if (match) {
-                          updated[index] = { ...channel, id: match[1], name: match[1], type: 'channel' };
-                          setRumbleChannels(updated);
-                          return;
-                        }
-                      } else if (val.includes('rumble.com/v')) {
-                        // Video/Livestream URL: https://rumble.com/v6xkx0a-...
-                        const videoId = val.split('/').pop()?.split('-')[0] || 'video';
-                        updated[index] = { ...channel, id: videoId, name: channel.name || 'Livestream', type: 'livestream', url: val };
-                        setRumbleChannels(updated);
-                        return;
-                      }
-                      updated[index] = { ...channel, id: val };
-                      setRumbleChannels(updated);
-                    }}
-                    placeholder="Channel ID or paste Rumble URL"
-                    style={{
-                      flex: 1,
-                      background: '#334155',
-                      border: 'none',
-                      borderRadius: '4px',
-                      color: '#e2e8f0',
-                      padding: '8px 12px',
-                      fontSize: '13px'
-                    }}
-                  />
-                  <input
-                    type="text"
-                    value={channel.name}
-                    onChange={(e) => {
-                      const updated = [...rumbleChannels];
-                      updated[index] = { ...channel, name: e.target.value };
-                      setRumbleChannels(updated);
-                    }}
-                    placeholder="Display Name"
-                    style={{
-                      width: '120px',
-                      background: '#334155',
-                      border: 'none',
-                      borderRadius: '4px',
-                      color: '#e2e8f0',
-                      padding: '8px 12px',
-                      fontSize: '13px'
-                    }}
-                  />
-                  {channel.type === 'livestream' && (
-                    <input
-                      type="text"
-                      value={channel.url || ''}
+                  {/* Row 1: Number, Type, Name, Delete */}
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: channel.type === 'livestream' ? '8px' : '0' }}>
+                    <span style={{ color: '#64748b', fontSize: '12px', width: '20px', flexShrink: 0 }}>{index + 1}.</span>
+                    <select
+                      value={channel.type}
                       onChange={(e) => {
                         const updated = [...rumbleChannels];
-                        updated[index] = { ...channel, url: e.target.value };
+                        updated[index] = { ...channel, type: e.target.value };
+                        if (e.target.value === 'channel') {
+                          delete updated[index].url;
+                        }
                         setRumbleChannels(updated);
                       }}
-                      placeholder="Rumble URL"
                       style={{
-                        width: '200px',
                         background: '#334155',
                         border: 'none',
                         borderRadius: '4px',
                         color: '#e2e8f0',
-                        padding: '8px 12px',
+                        padding: '6px 8px',
+                        fontSize: '12px',
+                        width: '95px',
+                        flexShrink: 0
+                      }}
+                    >
+                      <option value="channel">Channel</option>
+                      <option value="livestream">Livestream</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={channel.id}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        const updated = [...rumbleChannels];
+                        if (val.includes('rumble.com/c/')) {
+                          const match = val.match(/rumble\.com\/c\/([^\/?]+)/);
+                          if (match) {
+                            updated[index] = { ...channel, id: match[1], name: match[1], type: 'channel' };
+                            setRumbleChannels(updated);
+                            return;
+                          }
+                        } else if (val.includes('rumble.com/v')) {
+                          const videoId = val.split('/').pop()?.split('-')[0] || 'video';
+                          updated[index] = { ...channel, id: videoId, name: channel.name || 'Livestream', type: 'livestream', url: val };
+                          setRumbleChannels(updated);
+                          return;
+                        }
+                        updated[index] = { ...channel, id: val };
+                        setRumbleChannels(updated);
+                      }}
+                      placeholder="Channel ID or paste URL"
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        background: '#334155',
+                        border: 'none',
+                        borderRadius: '4px',
+                        color: '#e2e8f0',
+                        padding: '8px 10px',
                         fontSize: '13px'
                       }}
                     />
+                    <input
+                      type="text"
+                      value={channel.name}
+                      onChange={(e) => {
+                        const updated = [...rumbleChannels];
+                        updated[index] = { ...channel, name: e.target.value };
+                        setRumbleChannels(updated);
+                      }}
+                      placeholder="Display Name"
+                      style={{
+                        width: '110px',
+                        flexShrink: 0,
+                        background: '#334155',
+                        border: 'none',
+                        borderRadius: '4px',
+                        color: '#e2e8f0',
+                        padding: '8px 10px',
+                        fontSize: '13px'
+                      }}
+                    />
+                    <button
+                      onClick={() => {
+                        const updated = rumbleChannels.filter((_, i) => i !== index);
+                        setRumbleChannels(updated);
+                      }}
+                      style={{
+                        background: '#ef4444',
+                        border: 'none',
+                        borderRadius: '4px',
+                        color: 'white',
+                        padding: '6px 10px',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        flexShrink: 0
+                      }}
+                    >🗑</button>
+                  </div>
+                  {/* Row 2: URL field for livestreams only */}
+                  {channel.type === 'livestream' && (
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginLeft: '28px' }}>
+                      <span style={{ color: '#64748b', fontSize: '11px', flexShrink: 0 }}>URL:</span>
+                      <input
+                        type="text"
+                        value={channel.url || ''}
+                        onChange={(e) => {
+                          const updated = [...rumbleChannels];
+                          updated[index] = { ...channel, url: e.target.value };
+                          setRumbleChannels(updated);
+                        }}
+                        placeholder="https://rumble.com/v..."
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          background: '#334155',
+                          border: 'none',
+                          borderRadius: '4px',
+                          color: '#e2e8f0',
+                          padding: '6px 10px',
+                          fontSize: '12px'
+                        }}
+                      />
+                    </div>
                   )}
-                  <button
-                    onClick={() => {
-                      const updated = rumbleChannels.filter((_, i) => i !== index);
-                      setRumbleChannels(updated);
-                    }}
-                    style={{
-                      background: '#ef4444',
-                      border: 'none',
-                      borderRadius: '4px',
-                      color: 'white',
-                      padding: '6px 10px',
-                      cursor: 'pointer',
-                      fontSize: '12px'
-                    }}
-                  >🗑</button>
                 </div>
               ))}
             </div>
