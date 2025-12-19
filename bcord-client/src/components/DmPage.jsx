@@ -175,7 +175,7 @@ export default function DmPage() {
       }
     };
     fetchRumble();
-    const interval = setInterval(fetchRumble, 5 * 60 * 1000);
+    const interval = setInterval(fetchRumble, 5 * 1000); // 5 seconds
     return () => clearInterval(interval);
   }, []);
 
