@@ -4,21 +4,16 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-const CHANNELS = [
-  { id: 'SaltyCracker', name: 'TheSaltyCracker' },
-  { id: 'StevenCrowder', name: 'Steven Crowder' }
+// Default channels (used if no custom config provided)
+const DEFAULT_CHANNELS = [
+  { id: 'Infowars', name: 'InfoWars', type: 'livestream', url: 'https://rumble.com/v6xkx0a-infowars-network-feed-live-247.html' },
+  { id: 'SaltyCracker', name: 'SaltyCracker', type: 'channel' },
+  { id: 'StevenCrowder', name: 'Steven Crowder', type: 'channel' }
 ];
 
-const LIVESTREAMS = [
-  { url: 'https://rumble.com/v6xkx0a-infowars-network-feed-live-247.html', name: 'InfoWars Live' }
-];
-
-// ---------------------------------------------------------------------------
-// ADDED 2025-12-19: Scraper health monitoring
-// REASON: Scraper could silently fail if Rumble changes HTML structure
-// SOLUTION: Track consecutive failures and expose health status
-// ---------------------------------------------------------------------------
+// Scraper health monitoring
 let scraperHealth = {
   consecutiveEmptyLineups: 0,
   lastSuccessfulScrape: null,
@@ -27,7 +22,6 @@ let scraperHealth = {
   totalFailures: 0,
   channelStatus: {}
 };
-// ---------------------------------------------------------------------------
 
 async function scrapeChannel(channelId) {
   try {
@@ -38,10 +32,7 @@ async function scrapeChannel(channelId) {
     });
     const html = await response.text();
     
-    // Extract video URLs
     const videoMatches = html.match(/href="(\/v[^"]+\.html[^"]*)"/g);
-    
-    // Extract thumbnail URLs
     const thumbMatches = html.match(/src="(https:\/\/[^"]*-small-[^"]*\.jpg[^"]*)"/g);
     
     if (videoMatches && videoMatches.length > 0) {
@@ -50,7 +41,6 @@ async function scrapeChannel(channelId) {
       let thumbnail = null;
       if (thumbMatches && thumbMatches.length > 0) {
         const originalThumb = thumbMatches[0].match(/src="([^"]+)"/)[1];
-        // Use proxy URL instead of direct URL
         thumbnail = '/api/rumble/image?url=' + encodeURIComponent(originalThumb);
       }
       
@@ -60,11 +50,11 @@ async function scrapeChannel(channelId) {
         word.charAt(0).toUpperCase() + word.slice(1)
       ).join(' ');
       
-      // ADDED 2025-12-19: Track channel success
       scraperHealth.channelStatus[channelId] = { status: 'ok', lastSuccess: new Date().toISOString() };
       
       return {
         channelId,
+        channel: channelId,
         title: title.substring(0, 60) + (title.length > 60 ? '...' : ''),
         url: 'https://rumble.com' + videoUrl,
         thumbnail,
@@ -72,15 +62,11 @@ async function scrapeChannel(channelId) {
       };
     }
     
-    // ADDED 2025-12-19: Track channel failure
-    console.warn(`[SCRAPER WARNING] No videos found for channel: ${channelId} - HTML structure may have changed`);
     scraperHealth.channelStatus[channelId] = { status: 'empty', lastAttempt: new Date().toISOString() };
-    
     return null;
   } catch (error) {
     console.error(`Error scraping ${channelId}:`, error.message);
-    // ADDED 2025-12-19: Track channel error
-    scraperHealth.channelStatus[channelId] = { status: 'error', error: error.message, lastAttempt: new Date().toISOString() };
+    scraperHealth.channelStatus[channelId] = { status: 'error', error: error.message };
     return null;
   }
 }
@@ -107,6 +93,7 @@ async function checkLivestream(streamInfo) {
     
     return {
       name: streamInfo.name,
+      channel: streamInfo.name,
       title: title.substring(0, 50) + (title.length > 50 ? '...' : ''),
       url: streamInfo.url,
       thumbnail,
@@ -140,103 +127,119 @@ app.get('/api/rumble/image', async (req, res) => {
     
     const contentType = response.headers.get('content-type');
     res.set('Content-Type', contentType);
-    res.set('Cache-Control', 'public, max-age=86400'); // Cache for 24 hours
+    res.set('Cache-Control', 'public, max-age=86400');
     
     const buffer = await response.buffer();
     res.send(buffer);
   } catch (error) {
-    console.error('Image proxy error:', error.message);
     res.status(500).send('Failed to fetch image');
   }
 });
 
-// Cache results for 5 minutes
-let cache = { data: null, timestamp: 0 };
+// Cache per config hash
+let cache = {};
 const CACHE_TTL = 5 * 60 * 1000;
 
+// Fetch lineup with optional custom channels
+async function fetchLineup(channels) {
+  const channelConfigs = channels || DEFAULT_CHANNELS;
+  
+  scraperHealth.totalScrapes++;
+  scraperHealth.lastAttempt = new Date().toISOString();
+  
+  const channelPromises = channelConfigs
+    .filter(ch => ch.type === 'channel')
+    .map(ch => scrapeChannel(ch.id));
+    
+  const livestreamPromises = channelConfigs
+    .filter(ch => ch.type === 'livestream')
+    .map(ch => checkLivestream({ url: ch.url, name: ch.name }));
+  
+  const [channelResults, livestreamResults] = await Promise.all([
+    Promise.all(channelPromises),
+    Promise.all(livestreamPromises)
+  ]);
+  
+  // Build lineup in the order specified
+  const lineup = [];
+  for (const config of channelConfigs) {
+    if (config.type === 'livestream') {
+      const result = livestreamResults.find(r => r && r.name === config.name);
+      if (result) lineup.push(result);
+    } else {
+      const result = channelResults.find(r => r && r.channelId === config.id);
+      if (result) lineup.push(result);
+    }
+  }
+  
+  if (lineup.length === 0) {
+    scraperHealth.consecutiveEmptyLineups++;
+    scraperHealth.totalFailures++;
+  } else {
+    scraperHealth.consecutiveEmptyLineups = 0;
+    scraperHealth.lastSuccessfulScrape = new Date().toISOString();
+  }
+  
+  return { lineup, updated: new Date().toISOString() };
+}
+
+// GET lineup with default channels
 app.get('/api/rumble/lineup', async (req, res) => {
   const now = Date.now();
+  const cacheKey = 'default';
   
-  if (cache.data && (now - cache.timestamp) < CACHE_TTL) {
-    return res.json(cache.data);
+  if (cache[cacheKey] && (now - cache[cacheKey].timestamp) < CACHE_TTL) {
+    return res.json(cache[cacheKey].data);
   }
   
   try {
-    scraperHealth.totalScrapes++;
-    scraperHealth.lastAttempt = new Date().toISOString();
-    
-    const channelPromises = CHANNELS.map(ch => scrapeChannel(ch.id));
-    const livestreamPromises = LIVESTREAMS.map(ls => checkLivestream(ls));
-    
-    const [channelResults, livestreamResults] = await Promise.all([
-      Promise.all(channelPromises),
-      Promise.all(livestreamPromises)
-    ]);
-    
-    const lineup = [
-      ...livestreamResults.filter(r => r),
-      ...channelResults.filter(r => r)
-    ];
-    
-    // ---------------------------------------------------------------------------
-    // ADDED 2025-12-19: Monitor for empty lineup (scraper may be broken)
-    // ---------------------------------------------------------------------------
-    if (lineup.length === 0) {
-      scraperHealth.consecutiveEmptyLineups++;
-      scraperHealth.totalFailures++;
-      console.error(`[SCRAPER ALERT] Empty lineup returned! Consecutive failures: ${scraperHealth.consecutiveEmptyLineups}`);
-      console.error('[SCRAPER ALERT] Rumble HTML structure may have changed - check regex patterns');
-      
-      if (scraperHealth.consecutiveEmptyLineups >= 3) {
-        console.error('[SCRAPER CRITICAL] 3+ consecutive empty lineups - scraper is likely broken!');
-      }
-    } else {
-      scraperHealth.consecutiveEmptyLineups = 0;
-      scraperHealth.lastSuccessfulScrape = new Date().toISOString();
-    }
-    // ---------------------------------------------------------------------------
-    
-    cache = { data: { lineup, updated: new Date().toISOString() }, timestamp: now };
-    res.json(cache.data);
+    const data = await fetchLineup(null);
+    cache[cacheKey] = { data, timestamp: now };
+    res.json(data);
   } catch (error) {
     console.error('Error fetching lineup:', error);
-    scraperHealth.totalFailures++;
     res.status(500).json({ error: 'Failed to fetch lineup' });
   }
 });
 
+// POST lineup with custom channels (no caching for custom)
+app.post('/api/rumble/lineup', async (req, res) => {
+  try {
+    const { channels } = req.body;
+    if (!channels || !Array.isArray(channels) || channels.length === 0) {
+      return res.status(400).json({ error: 'channels array required' });
+    }
+    
+    // Validate channels (max 10)
+    if (channels.length > 10) {
+      return res.status(400).json({ error: 'Maximum 10 channels allowed' });
+    }
+    
+    const data = await fetchLineup(channels);
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching custom lineup:', error);
+    res.status(500).json({ error: 'Failed to fetch lineup' });
+  }
+});
+
+// Get default channels for UI
+app.get('/api/rumble/defaults', (req, res) => {
+  res.json({ channels: DEFAULT_CHANNELS });
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-// ---------------------------------------------------------------------------
-// ADDED 2025-12-19: Scraper status endpoint for monitoring
-// ---------------------------------------------------------------------------
 app.get('/api/rumble/status', (req, res) => {
-  const isHealthy = scraperHealth.consecutiveEmptyLineups < 3 && 
-                    scraperHealth.lastSuccessfulScrape !== null;
-  
+  const isHealthy = scraperHealth.consecutiveEmptyLineups < 3;
   res.json({
     status: isHealthy ? 'healthy' : 'degraded',
-    scraper: {
-      consecutiveEmptyLineups: scraperHealth.consecutiveEmptyLineups,
-      lastSuccessfulScrape: scraperHealth.lastSuccessfulScrape,
-      lastAttempt: scraperHealth.lastAttempt,
-      totalScrapes: scraperHealth.totalScrapes,
-      totalFailures: scraperHealth.totalFailures,
-      successRate: scraperHealth.totalScrapes > 0 
-        ? ((scraperHealth.totalScrapes - scraperHealth.totalFailures) / scraperHealth.totalScrapes * 100).toFixed(1) + '%'
-        : 'N/A'
-    },
-    channels: scraperHealth.channelStatus,
-    monitored: {
-      channels: CHANNELS.map(c => c.id),
-      livestreams: LIVESTREAMS.map(l => l.name)
-    }
+    scraper: scraperHealth,
+    defaultChannels: DEFAULT_CHANNELS
   });
 });
-// ---------------------------------------------------------------------------
 
 const PORT = 3099;
 app.listen(PORT, () => {
   console.log(`Rumble API running on port ${PORT}`);
-  console.log('[SCRAPER] Monitoring enabled - check /api/rumble/status for health');
 });

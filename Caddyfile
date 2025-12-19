@@ -105,7 +105,7 @@ https://bekord.com, https://www.bekord.com {
     # Rumble API - routes to backend (backend handles the Rumble fetching)
     @rumble_api path /api/rumble/*
     handle @rumble_api {
-        reverse_proxy bcord-backend:9000
+        reverse_proxy bcord-rumble-api:3099
     }
 
     # Rate limiting: General API (100 req/min)
