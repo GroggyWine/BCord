@@ -299,7 +299,7 @@ export default function DmPage() {
 
   if (loading) {
     return (
-      <div className="bcord-chat-page">
+      <div className="bcord-chat-root">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: '#9ca3af' }}>
           Loading...
         </div>
@@ -308,7 +308,7 @@ export default function DmPage() {
   }
 
   return (
-    <div className="bcord-chat-page">
+    <div className="bcord-chat-root">
       {/* TOP BAR */}
       <div className="bcord-chat-topbar">
         <div className="bcord-chat-topbar-left">
