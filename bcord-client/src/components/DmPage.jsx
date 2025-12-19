@@ -796,7 +796,7 @@ export default function DmPage() {
             </div>
             
             <p style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '16px' }}>
-              Add up to 10 Rumble channels or livestreams. Press Ctrl+Shift+K anytime to open this.
+              Add up to 10 Rumble channels. Just paste a Rumble URL and it auto-detects the type!
             </p>
             
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
@@ -837,11 +837,28 @@ export default function DmPage() {
                     type="text"
                     value={channel.id}
                     onChange={(e) => {
+                      const val = e.target.value;
                       const updated = [...rumbleChannels];
-                      updated[index] = { ...channel, id: e.target.value };
+                      // Auto-detect if user pastes a Rumble URL
+                      if (val.includes('rumble.com/c/')) {
+                        // Channel URL: https://rumble.com/c/SaltyCracker
+                        const match = val.match(/rumble\.com\/c\/([^\/?]+)/);
+                        if (match) {
+                          updated[index] = { ...channel, id: match[1], name: match[1], type: 'channel' };
+                          setRumbleChannels(updated);
+                          return;
+                        }
+                      } else if (val.includes('rumble.com/v')) {
+                        // Video/Livestream URL: https://rumble.com/v6xkx0a-...
+                        const videoId = val.split('/').pop()?.split('-')[0] || 'video';
+                        updated[index] = { ...channel, id: videoId, name: channel.name || 'Livestream', type: 'livestream', url: val };
+                        setRumbleChannels(updated);
+                        return;
+                      }
+                      updated[index] = { ...channel, id: val };
                       setRumbleChannels(updated);
                     }}
-                    placeholder="Channel ID (e.g. SaltyCracker)"
+                    placeholder="Channel ID or paste Rumble URL"
                     style={{
                       flex: 1,
                       background: '#334155',
