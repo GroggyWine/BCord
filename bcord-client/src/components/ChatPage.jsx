@@ -153,7 +153,6 @@ export default function ChatPage() {
           authenticatedUserRef.current = username;
           setCurrentUser(username);
           
-          console.log(`[Session] Authenticated as: ${username}`);
           
           // Check if user is admin by trying to access admin endpoint
           try {
@@ -1372,7 +1371,6 @@ export default function ChatPage() {
               <button
                 className="bcord-chat-invite-btn"
                 onClick={() => {
-                  console.log('[Invite Button] Clicked! Opening modal...');
                   loadFriends(); // Load friends list for selection
                   loadServerMembers(selectedServerId); // Load current members to filter
                   setSelectedFriendsToInvite([]); // Reset selection
@@ -1886,10 +1884,7 @@ export default function ChatPage() {
       )}
 
       {/* Invite User Modal */}
-      {(() => {
-        console.log('[Invite Modal] inviteUserModalOpen =', inviteUserModalOpen);
-        return inviteUserModalOpen;
-      })() && (
+      {inviteUserModalOpen && (
         <div className="profile-menu-overlay" onClick={() => setInviteUserModalOpen(false)}>
           <div className="create-server-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '450px' }}>
             <div className="modal-header">
