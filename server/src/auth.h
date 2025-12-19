@@ -17,6 +17,7 @@
 #include "jwt_utils.h"
 #include "metrics.h"
 #include "session.h"
+#include "send_email.h"
 
 // PG connection shared with main.cpp
 extern const std::string PG_CONN;
@@ -122,6 +123,16 @@ static RefreshTokenLookup resolve_refresh_token(const std::string &body_json,
 }
 
 // -----------------------------------------------------------------------------
+// Generate 6-digit verification code
+// -----------------------------------------------------------------------------
+static std::string generate_verification_code() {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> dist(100000, 999999);
+    return std::to_string(dist(gen));
+}
+
+// -----------------------------------------------------------------------------
 // DB helpers
 // -----------------------------------------------------------------------------
 static std::optional<UserRow> db_get_user_by_username(pqxx::work &txn,
@@ -155,11 +166,12 @@ static std::optional<UserRow> db_get_user_by_email(pqxx::work &txn,
 }
 
 static int db_create_user(pqxx::work &txn, const std::string &username,
-                          const std::string &email, const std::string &password_hash) {
+                          const std::string &email, const std::string &password_hash,
+                          const std::string &verification_code) {
     auto r = txn.exec_params(
-        "INSERT INTO users (username,email,password_hash,verified) "
-        "VALUES ($1,$2,$3,false) RETURNING id",
-        username, email, password_hash);
+        "INSERT INTO users (username, email, password_hash, verified, verification_code, verification_expires) "
+        "VALUES ($1, $2, $3, false, $4, NOW() + INTERVAL '24 hours') RETURNING id",
+        username, email, password_hash, verification_code);
     return r[0]["id"].as<int>();
 }
 
@@ -213,6 +225,7 @@ static HandlerResponse handle_register(const std::string &body_json) {
         }
 
         std::string phash = argon2id_hash(password);
+        std::string verification_code = generate_verification_code();
 
         pqxx::connection c(PG_CONN);
         pqxx::work txn(c);
@@ -226,11 +239,26 @@ static HandlerResponse handle_register(const std::string &body_json) {
             return json_error(409, "email already exists");
         }
 
-        (void)db_create_user(txn, username, email, phash);
+        (void)db_create_user(txn, username, email, phash, verification_code);
         txn.commit();
 
+        // Send verification email
+        std::string subject = "BeKord - Verify your account";
+        std::string body = "Hello " + username + ",\n\n"
+            "Welcome to BeKord! Your verification code is:\n\n"
+            "    " + verification_code + "\n\n"
+            "Enter this code on the verification page to activate your account.\n"
+            "This code expires in 24 hours.\n\n"
+            "If you did not create this account, you can ignore this email.\n\n"
+            "- The BeKord Team";
+
+        bool email_sent = send_email(email, subject, body);
+        if (!email_sent) {
+            std::cerr << "[Register] Warning: Failed to send verification email to " << email << std::endl;
+        }
+
         Metrics::instance().auth_register_success_total++;
-        return json_ok({{"message", "account created (verify email next)"}}, 201);
+        return json_ok({{"message", "Account created! Check your email for a verification code."}}, 201);
     } catch (const nlohmann::json::exception &e) {
         Metrics::instance().auth_register_failure_total++;
         return json_error(400, std::string("invalid JSON payload: ") + e.what());
@@ -374,4 +402,3 @@ static HandlerResponse handle_logout(const std::string &body_json,
         return json_error(500, std::string("logout failed: ") + e.what());
     }
 }
-

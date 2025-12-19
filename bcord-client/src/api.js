@@ -5,6 +5,16 @@ const API_BASE = "/api";
 let accessToken = localStorage.getItem("accessToken");
 let refreshToken = localStorage.getItem("refreshToken");
 
+// Configure the default axios instance to include auth header
+axios.interceptors.request.use((config) => {
+  const token = localStorage.getItem("accessToken");
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Also create a dedicated api instance
 export const api = axios.create({
   baseURL: API_BASE,
   headers: { "Content-Type": "application/json" },
@@ -12,18 +22,20 @@ export const api = axios.create({
 
 // attach token to every request
 api.interceptors.request.use((config) => {
-  if (accessToken) config.headers.Authorization = `Bearer ${accessToken}`;
+  const token = localStorage.getItem("accessToken");
+  if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
 // refresh handler
 async function refreshAccessToken() {
-  if (!refreshToken) return null;
+  const rt = localStorage.getItem("refreshToken");
+  if (!rt) return null;
   try {
-    const res = await axios.post(`${API_BASE}/auth/refresh`, { refresh_token: refreshToken });
-    accessToken = res.data.access_token;
-    localStorage.setItem("accessToken", accessToken);
-    return accessToken;
+    const res = await axios.post(`${API_BASE}/auth/refresh`, { refresh_token: rt });
+    const newToken = res.data.access_token;
+    localStorage.setItem("accessToken", newToken);
+    return newToken;
   } catch (err) {
     console.error("refresh failed:", err.response?.data || err.message);
     localStorage.removeItem("accessToken");
@@ -49,6 +61,23 @@ api.interceptors.response.use(
   }
 );
 
+// Also add response interceptor to default axios for 401 handling
+axios.interceptors.response.use(
+  (r) => r,
+  async (error) => {
+    const original = error.config;
+    if (error.response?.status === 401 && !original._retry) {
+      original._retry = true;
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        original.headers.Authorization = `Bearer ${newToken}`;
+        return axios(original);
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 // ---- API helpers ----
 export async function register(data) {
   return api.post("/auth/register", data);
@@ -60,7 +89,6 @@ export async function verify(data) {
 
 export async function login(data) {
   const res = await api.post("/auth/login", data);
-  // server should now return refresh_token + access token
   if (res.data.token) localStorage.setItem("accessToken", res.data.token);
   if (res.data.refresh_token) localStorage.setItem("refreshToken", res.data.refresh_token);
   return res;
@@ -76,4 +104,3 @@ export async function logout() {
 export async function getProfile() {
   return api.get("/profile");
 }
-

@@ -28,6 +28,13 @@ export default function DmPage() {
   const [friends, setFriends] = useState([]);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
   const [hasUnreadDms, setHasUnreadDms] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminPanelOpen, setAdminPanelOpen] = useState(false);
+  const [adminPassword, setAdminPassword] = useState("");
+  const [adminPanelError, setAdminPanelError] = useState("");
+  const [adminVerified, setAdminVerified] = useState(false);
+  const [users, setUsers] = useState([]);
   
   const messagesEndRef = useRef(null);
   const prevMessageCountRef = useRef(0);
@@ -37,13 +44,17 @@ export default function DmPage() {
 
   const userInitials = currentUser ? currentUser.slice(0, 2).toUpperCase() : "??";
 
-  // Load current user
+  // Load current user and check admin status
   useEffect(() => {
     async function loadUser() {
       try {
         const res = await axios.get("/api/profile", { withCredentials: true });
         if (res.data?.user) {
           setCurrentUser(res.data.user);
+          // Check if user is admin
+          if (res.data.is_admin) {
+            setIsAdmin(true);
+          }
         } else {
           navigate("/login");
         }
@@ -263,6 +274,76 @@ export default function DmPage() {
     navigate("/chat");
   };
 
+  function toggleProfileMenu() {
+    setProfileMenuOpen(!profileMenuOpen);
+  }
+
+  async function handleLogout() {
+    try {
+      await axios.post("/api/auth/logout", {}, { withCredentials: true });
+      localStorage.removeItem("accessToken");
+      localStorage.removeItem("refreshToken");
+      navigate("/login");
+    } catch (err) {
+      console.error("Logout error:", err);
+      navigate("/login");
+    }
+  }
+
+  async function verifyAdminPassword() {
+    setAdminPanelError("");
+    try {
+      const res = await axios.post("/api/admin/verify", { password: adminPassword }, { withCredentials: true });
+      if (res.data?.verified) {
+        setAdminVerified(true);
+        loadUsers();
+      }
+    } catch (err) {
+      setAdminPanelError(err.response?.data?.error || "Verification failed");
+    }
+  }
+
+  async function loadUsers() {
+    try {
+      const res = await axios.get("/api/admin/users", { 
+        headers: { "X-Admin-Password": adminPassword },
+        withCredentials: true 
+      });
+      if (res.data?.users) {
+        setUsers(res.data.users);
+      }
+    } catch (err) {
+      console.error("Failed to load users:", err);
+    }
+  }
+
+  async function deleteUser(username) {
+    if (!window.confirm(`Delete user "${username}"? This cannot be undone.`)) return;
+    try {
+      await axios.delete(`/api/admin/users/${username}`, {
+        headers: { "X-Admin-Password": adminPassword },
+        withCredentials: true
+      });
+      setUsers(users.filter(u => u.username !== username));
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to delete user");
+    }
+  }
+
+  async function resetPassword(username) {
+    const newPass = window.prompt(`Enter new password for "${username}":`);
+    if (!newPass) return;
+    try {
+      await axios.post(`/api/admin/users/${username}/reset-password`, 
+        { new_password: newPass },
+        { headers: { "X-Admin-Password": adminPassword }, withCredentials: true }
+      );
+      alert("Password reset successfully");
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to reset password");
+    }
+  }
+
   const handleSelectFriend = async (username) => {
     try {
       const res = await axios.post("/api/dm/start", { other_username: username }, { withCredentials: true });
@@ -412,7 +493,12 @@ export default function DmPage() {
           {/* USER PANEL */}
           <div className="bcord-user-panel">
             <div className="bcord-user-panel-info">
-              <div className="bcord-user-panel-avatar" title={currentUser}>
+              <div 
+                className="bcord-user-panel-avatar" 
+                title={`${currentUser} - Click for menu`}
+                onClick={toggleProfileMenu}
+                style={{ cursor: 'pointer' }}
+              >
                 {userInitials}
                 <span className="bcord-user-panel-status-dot" />
               </div>
@@ -552,7 +638,107 @@ export default function DmPage() {
         </div>
       </div>
 
-      
+      {/* Profile Menu Popup */}
+      {profileMenuOpen && (
+        <div className="profile-menu-overlay" onClick={() => setProfileMenuOpen(false)}>
+          <div className="profile-menu-popup" onClick={(e) => e.stopPropagation()}>
+            <div className="profile-menu-header">
+              <div className="profile-avatar-large">
+                {userInitials}
+              </div>
+              <div className="profile-info">
+                <div className="profile-username">{currentUser}</div>
+                <div className="profile-status">Online</div>
+              </div>
+            </div>
+            
+            <div className="profile-menu-divider"></div>
+            
+            <div className="profile-menu-items">
+              <button className="profile-menu-item">
+                <span className="icon">👤</span>
+                <span className="label">My Profile</span>
+              </button>
+              <button className="profile-menu-item">
+                <span className="icon">⚙️</span>
+                <span className="label">Settings</span>
+              </button>
+              <button className="profile-menu-item">
+                <span className="icon">🔒</span>
+                <span className="label">Privacy</span>
+              </button>
+              {isAdmin && (
+                <button 
+                  className="profile-menu-item" 
+                  onClick={() => {
+                    setProfileMenuOpen(false);
+                    setAdminPanelOpen(true);
+                  }}
+                >
+                  <span className="icon">👑</span>
+                  <span className="label">Admin</span>
+                </button>
+              )}
+            </div>
+            
+            <div className="profile-menu-divider"></div>
+            
+            <button className="profile-menu-item logout" onClick={handleLogout}>
+              <span className="icon">🚪</span>
+              <span className="label">Log Out</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Panel Modal */}
+      {adminPanelOpen && (
+        <div className="admin-panel-overlay" onClick={() => { setAdminPanelOpen(false); setAdminVerified(false); setAdminPassword(""); }}>
+          <div className="admin-panel-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="admin-panel-header">
+              <h2>🔐 Admin Access</h2>
+              <button className="admin-panel-close" onClick={() => { setAdminPanelOpen(false); setAdminVerified(false); setAdminPassword(""); }}>×</button>
+            </div>
+            
+            {!adminVerified ? (
+              <div className="admin-verify-form">
+                <p>Enter the admin password to access the user management panel.</p>
+                <label>Admin Password</label>
+                <input
+                  type="password"
+                  value={adminPassword}
+                  onChange={(e) => setAdminPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && verifyAdminPassword()}
+                  placeholder="Enter admin password"
+                />
+                {adminPanelError && <div className="admin-error">{adminPanelError}</div>}
+                <div className="admin-verify-buttons">
+                  <button className="admin-btn-cancel" onClick={() => { setAdminPanelOpen(false); setAdminPassword(""); }}>Cancel</button>
+                  <button className="admin-btn-verify" onClick={verifyAdminPassword}>Verify</button>
+                </div>
+              </div>
+            ) : (
+              <div className="admin-users-panel">
+                <h3>User Management</h3>
+                <div className="admin-users-list">
+                  {users.map((user) => (
+                    <div key={user.username} className="admin-user-row">
+                      <div className="admin-user-info">
+                        <span className="admin-user-name">{user.username}</span>
+                        <span className="admin-user-email">{user.email}</span>
+                      </div>
+                      <div className="admin-user-actions">
+                        <button onClick={() => resetPassword(user.username)}>Reset Password</button>
+                        <button className="danger" onClick={() => deleteUser(user.username)}>Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

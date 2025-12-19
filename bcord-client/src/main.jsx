@@ -11,6 +11,7 @@
 // =============================================================================
 
 import { StrictMode } from 'react';
+import './api.js'; // Initialize axios interceptors
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import './index.css';

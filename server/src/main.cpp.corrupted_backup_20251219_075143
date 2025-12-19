@@ -1,0 +1,2444 @@
+// ============================================================================
+// BCord Backend — HTTP + WebSocket + Postgres + Redis + JWT Auth + DM
+// ============================================================================
+
+#include <iostream>
+#include <string>
+#include <thread>
+#include <vector>
+#include <mutex>
+#include <memory>
+#include <chrono>
+#include <atomic>
+#include <sstream>
+#include <iomanip>
+#include <regex>
+#include <curl/curl.h>
+#include <nlohmann/json.hpp>
+#include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/websocket.hpp>
+#include <pqxx/pqxx>
+#include <sw/redis++/redis++.h>
+#include <openssl/sha.h>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+
+#include "jwt_utils.h"
+#include "metrics.h"
+#include "auth.h"
+#include "db_init.h"
+
+namespace net = boost::asio;
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace websocket = beast::websocket;
+using tcp = net::ip::tcp;
+std::mutex cout_mutex;
+
+// Helper to safely get environment variable with fallback
+static std::string get_env(const char* name, const std::string& fallback) {
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : fallback;
+}
+
+// Build PostgreSQL connection string from environment variables
+static std::string get_pg_conn() {
+    std::string host = get_env("PGHOST", "bcord-postgres");
+    std::string port = get_env("PGPORT", "5432");
+    std::string db   = get_env("PGDATABASE", "bcord");
+    std::string user = get_env("PGUSER", "bcord");
+    std::string pass = get_env("PGPASSWORD", "change_me");
+    
+    return "host=" + host + 
+           " port=" + port + 
+           " dbname=" + db + 
+           " user=" + user + 
+           " password=" + pass;
+}
+
+// Build Redis URI from environment variable
+static std::string get_redis_uri() {
+    return get_env("REDIS_URL", "tcp://bcord-redis:6379");
+}
+
+const std::string PG_CONN = get_pg_conn();
+static const std::string REDIS_URI = get_redis_uri();
+
+// ---------------------------------------------------------------------------
+// ADDED 2025-12-19: Database Connection Pool
+// REASON: Creating new connections per request caused bottleneck (163 req/s vs 4000)
+// SOLUTION: Pool of reusable connections with RAII wrapper for automatic return
+// ---------------------------------------------------------------------------
+#include <queue>
+#include <condition_variable>
+
+class ConnectionPool {
+public:
+    ConnectionPool(const std::string& conn_str, size_t pool_size = 10)
+        : conn_str_(conn_str), max_size_(pool_size) {
+        for (size_t i = 0; i < pool_size; ++i) {
+            try {
+                pool_.push(std::make_unique<pqxx::connection>(conn_str_));
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to create pool connection: " << e.what() << std::endl;
+            }
+        }
+        std::cout << "[POOL] Initialized with " << pool_.size() << " connections" << std::endl;
+    }
+
+    // Get a connection from the pool (blocks if none available)
+    std::unique_ptr<pqxx::connection> acquire() {
+        std::unique_lock<std::mutex> lock(mtx_);
+        
+        // Wait for available connection or create new one if under max
+        while (pool_.empty()) {
+            if (active_count_ < max_size_ * 2) {  // Allow temporary overflow
+                try {
+                    active_count_++;
+                    lock.unlock();
+                    return std::make_unique<pqxx::connection>(conn_str_);
+                } catch (...) {
+                    lock.lock();
+                    active_count_--;
+                    throw;
+                }
+            }
+            cv_.wait(lock);
+        }
+        
+        auto conn = std::move(pool_.front());
+        pool_.pop();
+        active_count_++;
+        
+        // Validate connection is still alive
+        try {
+            if (!conn->is_open()) {
+                conn = std::make_unique<pqxx::connection>(conn_str_);
+            }
+        } catch (...) {
+            conn = std::make_unique<pqxx::connection>(conn_str_);
+        }
+        
+        return conn;
+    }
+
+    // Return a connection to the pool
+    void release(std::unique_ptr<pqxx::connection> conn) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        active_count_--;
+        if (conn && conn->is_open() && pool_.size() < max_size_) {
+            pool_.push(std::move(conn));
+        }
+        cv_.notify_one();
+    }
+
+    size_t available() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return pool_.size();
+    }
+
+private:
+    std::string conn_str_;
+    size_t max_size_;
+    size_t active_count_ = 0;
+    std::queue<std::unique_ptr<pqxx::connection>> pool_;
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+};
+
+// RAII wrapper for automatic connection return
+class PooledConnection {
+public:
+    PooledConnection(ConnectionPool& pool) : pool_(pool), conn_(pool.acquire()) {}
+    ~PooledConnection() { pool_.release(std::move(conn_)); }
+    
+    pqxx::connection& operator*() { return *conn_; }
+    pqxx::connection* operator->() { return conn_.get(); }
+    pqxx::connection& get() { return *conn_; }
+    // Implicit conversion for backward compatibility with existing code
+    operator pqxx::connection&() { return *conn_; }
+    
+    // Prevent copying
+    PooledConnection(const PooledConnection&) = delete;
+    PooledConnection& operator=(const PooledConnection&) = delete;
+    
+    // Allow moving
+    PooledConnection(PooledConnection&&) = default;
+    PooledConnection& operator=(PooledConnection&&) = default;
+
+private:
+    ConnectionPool& pool_;
+    std::unique_ptr<pqxx::connection> conn_;
+};
+
+// Global connection pool instance (initialized after PG_CONN is set)
+static std::unique_ptr<ConnectionPool> g_db_pool;
+
+static void init_connection_pool() {
+    g_db_pool = std::make_unique<ConnectionPool>(PG_CONN, 20);
+    // NOTE: Using std::cout directly since log() is defined later in file
+    std::cout << "[POOL] ✅ Connection pool initialized with 20 connections" << std::endl;
+}
+// ---------------------------------------------------------------------------
+// END Connection Pool
+// ---------------------------------------------------------------------------
+
+
+static void log(const std::string &msg) {
+    std::lock_guard<std::mutex> lock(cout_mutex);
+    std::cout << "[" << std::time(nullptr) << "] " << msg << std::endl;
+}
+
+static void init_database() {
+    try {
+        // NOTE: Using direct connection here because pool is not yet initialized
+        pqxx::connection c(PG_CONN);
+        pqxx::work txn(c);
+        txn.commit();
+        log("✅ PostgreSQL table check complete");
+    } catch (std::exception &e) {
+        log(std::string("❌ PostgreSQL init error: ") + e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Rumble API - HTTPS helpers + caching
+// ---------------------------------------------------------------------------
+
+// CURL callback to append data to string
+static size_t rumble_curl_write_cb(void* contents, size_t size, size_t nmemb, std::string* out) {
+    size_t total = size * nmemb;
+    out->append((char*)contents, total);
+    return total;
+}
+
+// Simple HTTPS GET using libcurl
+static std::string https_get(const std::string& url) {
+    std::string response;
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("curl_easy_init failed");
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, rumble_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    // curl_easy_setopt(curl, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt"); // Let curl use system default
+    
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+    
+    if (res != CURLE_OK) {
+        throw std::runtime_error("curl_easy_perform failed: " + std::string(curl_easy_strerror(res)));
+    }
+    if (http_code != 200) {
+        throw std::runtime_error("HTTP error: " + std::to_string(http_code));
+    }
+    
+    return response;
+}
+
+// URL encode helper
+static std::string url_encode(const std::string& value) {
+    std::string result;
+    result.reserve(value.size() * 3);
+    
+    for (unsigned char c : value) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            result += c;
+        } else {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%%%02X", c);
+            result += buf;
+        }
+    }
+    return result;
+}
+
+// Rumble cache entry
+struct RumbleCacheEntry {
+    std::string channel;
+    std::string channel_url;
+    std::string video_url;
+    std::string title;
+    std::string thumbnail_url;
+    std::chrono::steady_clock::time_point fetched_at;
+    int cache_seconds;
+};
+
+static std::mutex rumble_cache_mutex;
+static std::map<std::string, RumbleCacheEntry> rumble_cache;
+
+// Get latest video from Rumble channel
+static RumbleCacheEntry get_rumble_latest(const std::string& channel) {
+    const int CACHE_SECONDS = 60;
+    auto now = std::chrono::steady_clock::now();
+    
+    // Check cache first
+    {
+        std::lock_guard<std::mutex> lock(rumble_cache_mutex);
+        auto it = rumble_cache.find(channel);
+        if (it != rumble_cache.end()) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                now - it->second.fetched_at
+            ).count();
+            if (age < CACHE_SECONDS) {
+                log("Rumble cache hit for: " + channel);
+                return it->second;
+            }
+        }
+    }
+    
+    log("Rumble fetching: " + channel);
+    
+    // Fetch channel page HTML
+    std::string channel_url = "https://rumble.com/c/" + channel;
+    std::string html = https_get(channel_url);
+    
+    // Extract first video URL: href="/v...html"
+    std::regex video_re(R"(href="(\/v[^"]+\.html)[^"]*)");
+    std::smatch match;
+    if (!std::regex_search(html, match, video_re)) {
+        throw std::runtime_error("No video found on channel page");
+    }
+    
+    std::string video_path = match[1].str();
+    std::string video_url = "https://rumble.com" + video_path;
+    
+    log("Rumble found video: " + video_url);
+    
+    // Call oEmbed API
+    std::string oembed_url = "https://rumble.com/api/Media/oembed.json?url=" + url_encode(video_url);
+    std::string oembed_json = https_get(oembed_url);
+    
+    // Parse oEmbed response
+    auto oembed = nlohmann::json::parse(oembed_json);
+    
+    RumbleCacheEntry entry;
+    entry.channel = channel;
+    entry.channel_url = channel_url;
+    entry.video_url = video_url;
+    entry.title = oembed.value("title", "");
+    entry.thumbnail_url = oembed.value("thumbnail_url", "");
+    entry.fetched_at = now;
+    entry.cache_seconds = CACHE_SECONDS;
+    
+    // Update cache
+    {
+        std::lock_guard<std::mutex> lock(rumble_cache_mutex);
+        rumble_cache[channel] = entry;
+    }
+    
+    log("Rumble cached: " + channel + " - " + entry.title);
+    
+    return entry;
+}
+
+// Cookie utilities
+// ---------------------------------------------------------------------------
+static std::string get_cookie(const http::request<http::string_body>& req,
+                              const std::string& name) {
+    auto it = req.find(http::field::cookie);
+    if (it == req.end()) return {};
+    std::string cookies = std::string(it->value());
+    std::regex kv_re("(^|;\\s*)" + name + "=([^;]+)");
+    std::smatch m;
+    if (std::regex_search(cookies, m, kv_re) && m.size() >= 3) {
+        return m[2].str();
+    }
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Helper to decode JWT and extract subject (username)
+// ---------------------------------------------------------------------------
+static std::string decode_jwt_subject(const std::string& token) {
+    size_t p1 = token.find('.');
+    size_t p2 = token.find('.', p1 + 1);
+    if (p1 == std::string::npos || p2 == std::string::npos) {
+        throw std::runtime_error("malformed token");
+    }
+
+    // Extract base64-encoded payload (between first and second dot)
+    std::string payload_enc = token.substr(p1 + 1, p2 - p1 - 1);
+
+    // Properly decode the base64url-encoded payload
+    std::string payload_json = base64url_decode(payload_enc);
+
+    try {
+        auto payload = nlohmann::json::parse(payload_json, nullptr, false);
+        if (!payload.is_object()) {
+            throw std::runtime_error("invalid payload");
+        }
+
+        // Extract the "sub" (subject) claim which contains the username
+        if (payload.contains("sub")) {
+            return payload["sub"].get<std::string>();
+        }
+
+        throw std::runtime_error("missing subject claim");
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("token decode error: ") + e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth middleware - returns username on success
+// ---------------------------------------------------------------------------
+static std::string authenticate_request(const http::request<http::string_body> &req) {
+    // Prefer Authorization: Bearer ...
+    auto it = req.find(http::field::authorization);
+    std::string token;
+
+    if (it != req.end()) {
+        std::string auth(it->value().data(), it->value().size());
+        if (auth.rfind("Bearer ", 0) != 0)
+            throw std::runtime_error("invalid scheme");
+        token = auth.substr(7);
+    } else {
+        // Fallback to cookie-based auth
+        token = get_cookie(req, "BCORD_ACCESS");
+        if (token.empty())
+            throw std::runtime_error("missing Authorization header");
+    }
+
+    if (!verify_jwt(token))
+        throw std::runtime_error("invalid or expired token");
+
+    return decode_jwt_subject(token);
+}
+
+// ---------------------------------------------------------------------------
+// DM Helper Structures and Functions
+// ---------------------------------------------------------------------------
+
+struct UserInfo {
+    int64_t id;
+    bool is_admin;
+};
+
+// Load user id + is_admin from username
+static UserInfo load_user_info(pqxx::connection& conn,
+                               const std::string& username)
+{
+    pqxx::read_transaction txn{conn};
+
+    auto r = txn.exec_params(
+        "SELECT id, is_admin "
+        "FROM users "
+        "WHERE username = $1",
+        username
+    );
+
+    if (r.empty()) {
+        throw std::runtime_error("user not found: " + username);
+    }
+
+    UserInfo info;
+    info.id = r[0]["id"].as<int64_t>();
+    info.is_admin = r[0]["is_admin"].as<bool>();
+    return info;
+}
+
+// Require that current user is admin
+static void require_admin(const UserInfo& info)
+{
+    if (!info.is_admin) {
+        throw std::runtime_error("admin privileges required");
+    }
+}
+
+// Get or create DM thread between two user_ids
+static int64_t get_or_create_dm(pqxx::connection& conn,
+                                int64_t user_a,
+                                int64_t user_b)
+{
+    if (user_a == user_b) {
+        throw std::runtime_error("Cannot create DM with yourself");
+    }
+
+    for (;;) {
+        pqxx::work txn{conn};
+
+        // Try to find existing DM between these two users
+        auto existing = txn.exec_params(
+            "SELECT dm_id "
+            "FROM direct_conversations "
+            "WHERE (user1_id = $1 AND user2_id = $2) "
+            "   OR (user1_id = $2 AND user2_id = $1) "
+            "FOR UPDATE",
+            user_a, user_b
+        );
+
+        if (!existing.empty()) {
+            int64_t dm_id = existing[0]["dm_id"].as<int64_t>();
+            txn.commit();
+            return dm_id;
+        }
+
+        // Try to insert; if someone else races us, unique index will throw
+        try {
+            auto ins = txn.exec_params(
+                "INSERT INTO direct_conversations (user1_id, user2_id) "
+                "VALUES ($1, $2) "
+                "RETURNING dm_id",
+                user_a, user_b
+            );
+            int64_t dm_id = ins[0]["dm_id"].as<int64_t>();
+            txn.commit();
+            return dm_id;
+        } catch (const pqxx::unique_violation&) {
+            txn.abort();
+            continue; // loop and SELECT again
+        }
+    }
+}
+
+// Send DM message
+static void send_dm_message(pqxx::connection& conn,
+                            int64_t current_user_id,
+                            int64_t dm_id,
+                            const std::string& content)
+{
+    if (content.empty()) {
+        throw std::runtime_error("message content cannot be empty");
+    }
+
+    pqxx::work txn{conn};
+
+    // Verify current_user_id is part of this DM thread
+    auto check = txn.exec_params(
+        "SELECT 1 FROM direct_conversations "
+        "WHERE dm_id = $1 "
+        "  AND (user1_id = $2 OR user2_id = $2)",
+        dm_id, current_user_id
+    );
+    if (check.empty()) {
+        throw std::runtime_error("not a member of this DM");
+    }
+
+    // Insert the message
+    txn.exec_params(
+        "INSERT INTO direct_messages (dm_id, sender_id, content) "
+        "VALUES ($1, $2, $3)",
+        dm_id, current_user_id, content
+    );
+
+    // Update DM's last_message_at
+    txn.exec_params(
+        "UPDATE direct_conversations "
+        "SET last_message_at = NOW() "
+        "WHERE dm_id = $1",
+        dm_id
+    );
+
+    txn.commit();
+}
+
+// List DMs for current user
+static nlohmann::json list_dms_for_user(pqxx::connection& conn,
+                                        int64_t current_user_id)
+{
+    pqxx::read_transaction txn{conn};
+
+    auto r = txn.exec_params(
+        "SELECT "
+        "  dc.dm_id, "
+        "  CASE "
+        "    WHEN dc.user1_id = $1 THEN dc.user2_id "
+        "    ELSE dc.user1_id "
+        "  END AS other_user_id, "
+        "  u.username AS other_username, "
+        "  COALESCE( "
+        "    (SELECT dm.content "
+        "     FROM direct_messages dm "
+        "     WHERE dm.dm_id = dc.dm_id "
+        "       AND dm.deleted_by_admin = FALSE "
+        "     ORDER BY dm.created_at DESC "
+        "     LIMIT 1), "
+        "    '' "
+        "  ) AS last_message_content, "
+        "  COALESCE( "
+        "    (SELECT dm.created_at::text "
+        "     FROM direct_messages dm "
+        "     WHERE dm.dm_id = dc.dm_id "
+        "       AND dm.deleted_by_admin = FALSE "
+        "     ORDER BY dm.created_at DESC "
+        "     LIMIT 1), "
+        "    dc.created_at::text "
+        "  ) AS last_message_time "
+        "FROM direct_conversations dc "
+        "JOIN users u ON u.id = CASE "
+        "  WHEN dc.user1_id = $1 THEN dc.user2_id "
+        "  ELSE dc.user1_id "
+        "END "
+        "WHERE dc.user1_id = $1 OR dc.user2_id = $1 "
+        "ORDER BY COALESCE(dc.last_message_at, dc.created_at) DESC",
+        current_user_id
+    );
+
+    nlohmann::json arr = nlohmann::json::array();
+
+    for (const auto& row : r) {
+        nlohmann::json item;
+        item["dm_id"] = row["dm_id"].as<int64_t>();
+        item["other_user_id"] = row["other_user_id"].as<int64_t>();
+        item["other_username"] = row["other_username"].c_str();
+        item["last_message_content"] = row["last_message_content"].c_str();
+        item["last_message_time"] = row["last_message_time"].c_str();
+        arr.push_back(item);
+    }
+
+    return arr;
+}
+
+// Admin: fetch DM thread
+static nlohmann::json admin_fetch_dm_thread(pqxx::connection& conn,
+                                            int64_t dm_id)
+{
+    pqxx::read_transaction txn{conn};
+
+    auto r = txn.exec_params(
+        "SELECT "
+        "  dm.dm_message_id, "
+        "  dm.dm_id, "
+        "  dm.sender_id, "
+        "  u.username AS sender_username, "
+        "  dm.content, "
+        "  dm.created_at::text AS created_at, "
+        "  dm.edited_at::text AS edited_at, "
+        "  dm.deleted_by_admin "
+        "FROM direct_messages dm "
+        "JOIN users u ON u.id = dm.sender_id "
+        "WHERE dm.dm_id = $1 "
+        "ORDER BY dm.created_at ASC",
+        dm_id
+    );
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& row : r) {
+        nlohmann::json item;
+        item["dm_message_id"] = row["dm_message_id"].as<int64_t>();
+        item["dm_id"] = row["dm_id"].as<int64_t>();
+        item["sender_id"] = row["sender_id"].as<int64_t>();
+        item["sender_username"] = row["sender_username"].c_str();
+        item["content"] = row["content"].c_str();
+        item["created_at"] = row["created_at"].c_str();
+        item["edited_at"] = row["edited_at"].is_null()
+            ? nullptr
+            : nlohmann::json(row["edited_at"].c_str());
+        item["deleted_by_admin"] = row["deleted_by_admin"].as<bool>();
+        arr.push_back(item);
+    }
+    return arr;
+}
+
+// User: fetch DM thread (privacy-enforced)
+static nlohmann::json fetch_dm_thread_for_user(pqxx::connection& conn,
+                                               int64_t current_user_id,
+                                               int64_t dm_id)
+{
+    // Verify the user is a participant in this DM thread
+    {
+        pqxx::read_transaction check_txn{conn};
+        auto chk = check_txn.exec_params(
+            "SELECT 1 FROM direct_conversations "
+            "WHERE dm_id = $1 "
+            "  AND (user1_id = $2 OR user2_id = $2)",
+            dm_id, current_user_id
+        );
+        if (chk.empty()) {
+            throw std::runtime_error("not a member of this DM");
+        }
+    }
+
+    pqxx::read_transaction txn{conn};
+    auto r = txn.exec_params(
+        "SELECT "
+        "  dm.dm_message_id, "
+        "  dm.dm_id, "
+        "  dm.sender_id, "
+        "  u.username AS sender_username, "
+        "  dm.content, "
+        "  dm.created_at::text AS created_at, "
+        "  dm.edited_at::text AS edited_at, "
+        "  dm.deleted_by_admin "
+        "FROM direct_messages dm "
+        "JOIN users u ON u.id = dm.sender_id "
+        "WHERE dm.dm_id = $1 "
+        "  AND dm.deleted_by_admin = FALSE "
+        "ORDER BY dm.created_at ASC",
+        dm_id
+    );
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& row : r) {
+        nlohmann::json item;
+        item["dm_message_id"] = row["dm_message_id"].as<int64_t>();
+        item["dm_id"] = row["dm_id"].as<int64_t>();
+        item["sender_id"] = row["sender_id"].as<int64_t>();
+        item["sender_username"] = row["sender_username"].c_str();
+        item["content"] = row["content"].c_str();
+        item["created_at"] = row["created_at"].c_str();
+        item["edited_at"] = row["edited_at"].is_null()
+            ? nullptr
+            : nlohmann::json(row["edited_at"].c_str());
+        item["deleted_by_admin"] = row["deleted_by_admin"].as<bool>();
+        arr.push_back(item);
+    }
+    return arr;
+}
+
+
+// ---------------------------------------------------------------------------
+// HTTP handler
+// ---------------------------------------------------------------------------
+template <class Stream>
+static void handle_request(http::request<http::string_body> &req, Stream &stream) {
+    http::response<http::string_body> res{http::status::ok, req.version()};
+    const std::string target = std::string(req.target());
+    const auto method = req.method();
+    log("HTTP request: " + target + " method=" + std::string(req.method_string()));
+    // Separate path and query for endpoints like /api/history?channel=...&limit=...
+    std::string path = target;
+    std::string query_string;
+    std::string cookie_header;
+    auto qpos = path.find('?');
+    if (qpos != std::string::npos) {
+        query_string = path.substr(qpos + 1);
+        path = path.substr(0, qpos);
+    }
+
+    if (auto it = req.find(http::field::cookie); it != req.end()) {
+        cookie_header = std::string(it->value());
+    }
+
+    if (target == "/api/health" && method == http::verb::get) {
+        res.set(http::field::content_type, "application/json");
+        res.body() = R"({"status":"healthy"})";
+    }
+    else if ((target == "/metrics") && method == http::verb::get) {
+        // ✅ Use Metrics singleton to generate Prometheus text format
+        res.set(http::field::content_type, "text/plain; version=0.0.4");
+        res.body() = Metrics::instance().to_prometheus_text();
+    }
+    else if (target == "/api/auth/register" && method == http::verb::post) {
+        auto [body, status_code] = handle_register(req.body());
+        res.result(static_cast<http::status>(status_code));
+        res.set(http::field::content_type, "application/json");
+        res.body() = body;
+    }
+    else if (target == "/api/auth/login" && method == http::verb::post) {
+        auto [body, status_code] = handle_login(req.body());
+        res.result(static_cast<http::status>(status_code));
+        res.set(http::field::content_type, "application/json");
+        res.body() = body;
+        try {
+            const bool success = status_code >= 200 && status_code < 300;
+            if (success) {
+                auto json = nlohmann::json::parse(body);
+                // In 2FA-able logins, token/refresh_token may be missing when 2fa_required=true
+                if (json.contains("token")) {
+                    std::string access = json["token"].get<std::string>();
+                    res.set(http::field::set_cookie,
+                        "BCORD_ACCESS=" + access +
+                        "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=900");
+                }
+                if (json.contains("refresh_token")) {
+                    std::string refresh = json["refresh_token"].get<std::string>();
+                    res.insert(http::field::set_cookie,
+                        "BCORD_REFRESH=" + refresh +
+                        "; Path=/api/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=604800");
+                }
+            }
+        } catch (...) {
+            // If parsing failed, we still return the JSON body as-is.
+        }
+
+    }
+    else if ((target == "/api/auth/verify" || target == "/auth/verify") &&
+             method == http::verb::post) {
+        log("[AUTH] /api/auth/verify");
+        res.set(http::field::content_type, "application/json");
+
+        try {
+            auto body = nlohmann::json::parse(req.body(), nullptr, false);
+            if (!body.is_object() || !body.contains("username") || !body.contains("code")) {
+                res.result(http::status::bad_request);
+                res.body() = R"({"status":"error","message":"missing username or code"})";
+            } else {
+                std::string username = body["username"].get<std::string>();
+                std::string code     = body["code"].get<std::string>();
+
+                // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+                // OLD: pqxx::connection c(PG_CONN);
+                PooledConnection c(*g_db_pool);
+                pqxx::work txn(c);
+
+                // First: does the user exist, and are they already verified?
+                auto r = txn.exec_params(
+                    "SELECT verified FROM users WHERE username=$1",
+                    username
+                );
+
+                if (r.empty()) {
+                    res.result(http::status::not_found);
+                    res.body() = R"({"status":"error","message":"user not found"})";
+                } else if (r[0]["verified"].as<bool>()) {
+                    res.result(http::status::ok);
+                    res.body() = R"({"status":"ok","message":"already verified"})";
+                } else {
+                    // Atomic verification: code must match AND not be expired
+                    auto upd = txn.exec_params(
+                        "UPDATE users "
+                        "SET verified=TRUE, "
+                        "    verification_code=NULL, "
+                        "    verification_expires=NULL "
+                        "WHERE username=$1 "
+                        "  AND verification_code=$2 "
+                        "  AND verification_expires > NOW() "
+                        "RETURNING id",
+                        username, code
+                    );
+
+                    if (upd.empty()) {
+                        res.result(http::status::unauthorized);
+                        res.body() =
+                            R"({"status":"error","message":"invalid or expired code"})";
+                    } else {
+                        txn.commit();
+                        res.result(http::status::ok);
+                        res.body() =
+                            R"({"status":"ok","message":"verification successful"})";
+                    }
+                }
+            }
+        } catch (const std::exception &e) {
+            res.result(http::status::internal_server_error);
+            res.body() =
+                std::string("{\"status\":\"error\",\"message\":\"") + e.what() + "\"}";
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 2FA: TOTP setup + status (requires existing auth)
+    // -----------------------------------------------------------------------
+    else if (target == "/api/auth/2fa/setup-begin" && method == http::verb::post) {
+        log("[2FA] /api/auth/2fa/setup-begin");
+        res.set(http::field::content_type, "application/json");
+        try {
+            std::string username = authenticate_request(req);
+            nlohmann::json stub; stub["status"] = "error"; stub["message"] = "2FA not implemented"; auto body = stub.dump(); int status_code = 501;
+            res.result(static_cast<http::status>(status_code));
+            res.body() = body;
+        } catch (const std::exception &e) {
+            res.result(http::status::unauthorized);
+            res.body() = R"({"status":"error","message":")" + std::string(e.what()) + "\"}";
+        }
+    }
+    else if (target == "/api/auth/2fa/setup-verify" && method == http::verb::post) {
+        log("[2FA] /api/auth/2fa/setup-verify");
+        res.set(http::field::content_type, "application/json");
+        try {
+            std::string username = authenticate_request(req);
+            nlohmann::json stub; stub["status"] = "error"; stub["message"] = "2FA not implemented"; auto body = stub.dump(); int status_code = 501;
+            res.result(static_cast<http::status>(status_code));
+            res.body() = body;
+        } catch (const std::exception &e) {
+            res.result(http::status::unauthorized);
+            res.body() = R"({"status":"error","message":")" + std::string(e.what()) + "\"}";
+        }
+    }
+    else if (target == "/api/auth/2fa/status" && method == http::verb::get) {
+        log("[2FA] /api/auth/2fa/status");
+        res.set(http::field::content_type, "application/json");
+        try {
+            std::string username = authenticate_request(req);
+            nlohmann::json stub; stub["status"] = "error"; stub["message"] = "2FA not implemented"; auto body = stub.dump(); int status_code = 501;
+            res.result(static_cast<http::status>(status_code));
+            res.body() = body;
+        } catch (const std::exception &e) {
+            res.result(http::status::unauthorized);
+            res.body() = R"({"status":"error","message":")" + std::string(e.what()) + "\"}";
+        }
+    }
+    else if (target == "/api/auth/2fa/verify-login" && method == http::verb::post) {
+        log("[2FA] /api/auth/2fa/verify-login");
+        res.set(http::field::content_type, "application/json");
+
+        nlohmann::json stub; stub["status"] = "error"; stub["message"] = "2FA not implemented"; auto body = stub.dump(); int status_code = 501;
+        res.result(static_cast<http::status>(status_code));
+        res.body() = body;
+
+        try {
+            const bool success = status_code >= 200 && status_code < 300;
+            if (success) {
+                auto json = nlohmann::json::parse(body);
+                if (json.contains("token")) {
+                    std::string access = json["token"].get<std::string>();
+                    res.set(http::field::set_cookie,
+                        "BCORD_ACCESS=" + access +
+                        "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=900");
+                }
+                if (json.contains("refresh_token")) {
+                    std::string refresh = json["refresh_token"].get<std::string>();
+                    res.insert(http::field::set_cookie,
+                        "BCORD_REFRESH=" + refresh +
+                        "; Path=/api/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=604800");
+                }
+            }
+        } catch (...) {
+            // If parsing failed, leave body as-is.
+        }
+    }
+
+    // 2c) Refresh & Logout
+    else if ((target == "/api/auth/refresh") && method == http::verb::post) {
+        log("[AUTH] /api/auth/refresh");
+        res.set(http::field::content_type, "application/json");
+
+        auto [resp_body, status_code] = handle_refresh(req.body(), cookie_header);
+        res.result(static_cast<http::status>(status_code));
+        res.body() = resp_body;
+        try {
+            const bool success = status_code >= 200 && status_code < 300;
+            if (success) {
+                auto json = nlohmann::json::parse(resp_body);
+                if (json.contains("access_token")) {
+                    std::string access = json["access_token"].get<std::string>();
+                    res.set(http::field::set_cookie,
+                        "BCORD_ACCESS=" + access +
+                        "; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=900");
+                }
+            }
+        } catch (...) {}
+
+    }
+    else if ((target == "/api/auth/logout") && method == http::verb::post) {
+        log("[AUTH] /api/auth/logout");
+        res.set(http::field::content_type, "application/json");
+        auto [body, status_code] = handle_logout(req.body(), cookie_header);
+        res.result(static_cast<http::status>(status_code));
+        res.body() = body;
+        if (status_code >= 200 && status_code < 300) {
+            res.set(http::field::set_cookie,
+                "BCORD_ACCESS=; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=0");
+            res.insert(http::field::set_cookie,
+                "BCORD_REFRESH=; Path=/api/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=0");
+        }
+    }
+    else if (target == "/api/auth/request-reset" && method == http::verb::post) {
+        log("[AUTH] /api/auth/request-reset");
+        res.set(http::field::content_type, "application/json");
+        nlohmann::json stub; stub["status"] = "error"; stub["message"] = "Password reset not implemented"; auto body = stub.dump(); int status_code = 501;
+        res.result(static_cast<http::status>(status_code));
+        res.body() = body;
+    }
+    else if (target == "/api/auth/reset-password" && method == http::verb::post) {
+        log("[AUTH] /api/auth/reset-password");
+        res.set(http::field::content_type, "application/json");
+        nlohmann::json stub; stub["status"] = "error"; stub["message"] = "Password reset not implemented"; auto body = stub.dump(); int status_code = 501;
+        res.result(static_cast<http::status>(status_code));
+        res.body() = body;
+    }
+    else if (target == "/api/profile" && method == http::verb::get) {
+        try {
+            auto auth = authenticate_request(req);   // existing JWT verify
+            res.set(http::field::content_type, "application/json");
+            res.body() = R"({"status":"ok","user":")" + auth + R"("})";
+        } catch (const std::exception &e) {
+            res.result(http::status::unauthorized);
+            res.body() = R"({"status":"error","message":")" + std::string(e.what()) + "\"}";
+        }
+    }
+    // -----------------------------------------------------------------------
+    // Message send: POST /api/messages  { "channel": "...", "body": "..." }
+    // -----------------------------------------------------------------------
+    else if (path == "/api/messages" && method == http::verb::post) {
+        try {
+            // Require authentication
+            std::string username = authenticate_request(req);
+
+            // Parse JSON body
+            auto j = nlohmann::json::parse(req.body(), nullptr, false);
+            int64_t server_id        = j.value("server_id", 1LL);  // Default to server 1
+            std::string channel_name = j.value("channel", "general");
+            std::string body_txt     = j.value("body", "");
+
+            if (channel_name.empty() || body_txt.empty()) {
+                res.result(http::status::bad_request);
+                res.set(http::field::content_type, "application/json");
+                res.body() =
+                    R"({"status":"error","message":"channel and body are required"})";
+            }
+
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+                // OLD: pqxx::connection c(PG_CONN);
+                PooledConnection c(*g_db_pool);
+            pqxx::work txn(c);
+
+            // Verify user has access to this server
+            auto access_check = txn.exec_params(
+                "SELECT 1 FROM server_members WHERE server_id = $1 AND username = $2",
+                server_id, username
+            );
+            if (access_check.empty()) {
+                throw std::runtime_error("access denied to this server");
+            }
+
+            // Ensure channel exists for THIS server and get its id
+            long long channel_id = 0;
+            auto rc = txn.exec_params(
+                "SELECT id FROM channels WHERE server_id = $1 AND name = $2",
+                server_id, channel_name
+            );
+            if (rc.empty()) {
+                auto ins = txn.exec_params(
+                    "INSERT INTO channels (server_id, name) VALUES ($1, $2) RETURNING id",
+                    server_id, channel_name
+                );
+                channel_id = ins[0]["id"].as<long long>();
+            } else {
+                channel_id = rc[0]["id"].as<long long>();
+            }
+
+            // Insert message
+            auto rm = txn.exec_params(
+                "INSERT INTO messages (channel_id, sender, body) "
+                "VALUES ($1, $2, $3) "
+                "RETURNING id, created_at",
+                channel_id, username, body_txt
+            );
+
+            long long msg_id = rm[0]["id"].as<long long>();
+            std::string created = rm[0]["created_at"].c_str();
+
+            txn.commit();
+
+            nlohmann::json resp = {
+                {"status", "ok"},
+                {"id", msg_id},
+                {"sender", username},
+                {"body", body_txt},
+                {"created_at", created},
+                {"channel", channel_name},
+                {"server_id", server_id}
+            };
+
+            res.set(http::field::content_type, "application/json");
+            res.body() = resp.dump();
+        } catch (const std::exception &e) {
+            std::string what = e.what();
+            bool auth_error =
+                what.find("missing Authorization header") != std::string::npos ||
+                what.find("invalid or expired token") != std::string::npos ||
+                what.find("invalid scheme") != std::string::npos ||
+                what.find("access denied") != std::string::npos;
+            if (auth_error) {
+                res.result(http::status::unauthorized);
+                res.set(http::field::content_type, "application/json");
+                res.body() = R"({"status":"error","message":"unauthorized"})";
+            } else {
+                res.result(http::status::internal_server_error);
+                res.set(http::field::content_type, "application/json");
+                res.body() =
+                    std::string("{\"status\":\"error\",\"message\":\"send failed: ") +
+                    what + "\"}";
+            }
+        }
+    }
+    // -----------------------------------------------------------------------
+    // Message history: GET /api/history?channel=general&limit=50
+    // -----------------------------------------------------------------------
+    else if (path == "/api/history" && method == http::verb::get) {
+        try {
+            // Require authentication
+            std::string username = authenticate_request(req);
+            (void)username;
+
+            // Defaults
+            int64_t server_id = 1;  // Default to server 1
+            std::string channel_name = "general";
+            int limit = 50;
+
+            // Parse query_string: channel=...&limit=...
+            if (!query_string.empty()) {
+                std::istringstream iss(query_string);
+                std::string kv;
+                while (std::getline(iss, kv, '&')) {
+                    auto eq = kv.find('=');
+                    if (eq == std::string::npos) continue;
+                    std::string key = kv.substr(0, eq);
+                    std::string val = kv.substr(eq + 1);
+                    if (key == "server_id") {
+                        try {
+                            server_id = std::stoll(val);
+                        } catch (...) {
+                            // ignore bad server_id
+                        }
+                    } else if (key == "channel" && !val.empty()) {
+                        channel_name = val;
+                    } else if (key == "limit") {
+                        try {
+                            int parsed = std::stoi(val);
+                            if (parsed > 0 && parsed <= 500) {
+                                limit = parsed;
+                            }
+                        } catch (...) {
+                            // ignore bad limit
+                        }
+                    }
+                }
+            }
+
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+                // OLD: pqxx::connection c(PG_CONN);
+                PooledConnection c(*g_db_pool);
+            pqxx::work txn(c);
+
+            // Verify user has access to this server
+            auto access_check = txn.exec_params(
+                "SELECT 1 FROM server_members WHERE server_id = $1 AND username = $2",
+                server_id, username
+            );
+            if (access_check.empty()) {
+                throw std::runtime_error("access denied to this server");
+            }
+
+            auto rows = txn.exec_params(
+                "SELECT m.id, m.sender, m.body, m.created_at "
+                "FROM messages m "
+                "JOIN channels ch ON m.channel_id = ch.id "
+                "WHERE ch.server_id = $1 AND ch.name = $2 "
+                "ORDER BY m.id DESC "
+                "LIMIT $3",
+                server_id,
+                channel_name,
+                limit
+            );
+
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto &row : rows) {
+                nlohmann::json msg;
+                msg["id"] = row["id"].as<long long>();
+                msg["sender"] = std::string(row["sender"].c_str());
+                msg["body"] = std::string(row["body"].c_str());
+                msg["created_at"] = std::string(row["created_at"].c_str());
+                arr.push_back(std::move(msg));
+            }
+
+            res.set(http::field::content_type, "application/json");
+            res.body() = arr.dump();
+        } catch (const std::exception &e) {
+            std::string what = e.what();
+            bool auth_error =
+                what.find("missing Authorization header") != std::string::npos ||
+                what.find("invalid or expired token") != std::string::npos ||
+                what.find("invalid scheme") != std::string::npos;
+            if (auth_error) {
+                res.result(http::status::unauthorized);
+                res.set(http::field::content_type, "application/json");
+                res.body() = R"({"status":"error","message":"unauthorized"})";
+            } else {
+                res.result(http::status::internal_server_error);
+                res.set(http::field::content_type, "application/json");
+                res.body() =
+                    std::string("{\"status\":\"error\",\"message\":\"history failed: ") +
+                    what + "\"}";
+            }
+        }
+    }
+    // -----------------------------------------------------------------------
+    // DM ENDPOINTS
+    // -----------------------------------------------------------------------
+    else if (path == "/api/dm/start" && method == http::verb::post) {
+        try {
+            std::string current_username = authenticate_request(req);
+
+            // Parse body
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            if (!j.contains("other_username")) {
+                throw std::runtime_error("missing other_username");
+            }
+            std::string other_username = j["other_username"].get<std::string>();
+
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            UserInfo me = load_user_info(db, current_username);
+            UserInfo other = load_user_info(db, other_username);
+
+            int64_t dm_id = get_or_create_dm(db, me.id, other.id);
+
+            nlohmann::json out;
+            out["dm_id"] = dm_id;
+            out["other_username"] = other_username;
+
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    else if (path == "/api/dm/send" && method == http::verb::post) {
+        try {
+            std::string current_username = authenticate_request(req);
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+
+            if (!j.contains("dm_id") || !j.contains("content")) {
+                throw std::runtime_error("dm_id and content are required");
+            }
+
+            int64_t dm_id = j["dm_id"].get<int64_t>();
+            std::string content = j["content"].get<std::string>();
+
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            UserInfo me = load_user_info(db, current_username);
+
+            send_dm_message(db, me.id, dm_id, content);
+
+            nlohmann::json out;
+            out["status"] = "ok";
+
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    else if (path == "/api/dm/list" && method == http::verb::get) {
+        try {
+            std::string current_username = authenticate_request(req);
+
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            UserInfo me = load_user_info(db, current_username);
+
+            nlohmann::json arr = list_dms_for_user(db, me.id);
+
+            nlohmann::json out;
+            out["dms"] = arr;
+
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    else if (path == "/api/dm/thread" && method == http::verb::get) {
+        try {
+            std::string current_username = authenticate_request(req);
+
+            // parse dm_id from query_string
+            std::string dm_id_str;
+            {
+                std::istringstream qs(query_string);
+                std::string kv;
+                while (std::getline(qs, kv, '&')) {
+                    auto eq = kv.find('=');
+                    if (eq == std::string::npos) continue;
+                    std::string key = kv.substr(0, eq);
+                    std::string val = kv.substr(eq + 1);
+                    if (key == "dm_id") {
+                        dm_id_str = val;
+                        break;
+                    }
+                }
+            }
+            if (dm_id_str.empty()) {
+                throw std::runtime_error("missing dm_id");
+            }
+            int64_t dm_id = std::stoll(dm_id_str);
+
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            UserInfo me = load_user_info(db, current_username);
+
+            nlohmann::json messages = fetch_dm_thread_for_user(db, me.id, dm_id);
+
+            nlohmann::json out;
+            out["dm_id"] = dm_id;
+            out["messages"] = messages;
+
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    else if (path == "/api/admin/dm/thread" && method == http::verb::get) {
+        try {
+            std::string current_username = authenticate_request(req);
+
+            // parse query param dm_id from query_string
+            std::string dm_id_str;
+            {
+                std::istringstream qs(query_string);
+                std::string kv;
+                while (std::getline(qs, kv, '&')) {
+                    auto eq = kv.find('=');
+                    if (eq == std::string::npos) continue;
+                    std::string key = kv.substr(0, eq);
+                    std::string val = kv.substr(eq + 1);
+                    if (key == "dm_id") {
+                        dm_id_str = val;
+                        break;
+                    }
+                }
+            }
+            if (dm_id_str.empty()) {
+                throw std::runtime_error("missing dm_id");
+            }
+            int64_t dm_id = std::stoll(dm_id_str);
+
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            UserInfo me = load_user_info(db, current_username);
+            require_admin(me); // 🚨 admin-only
+
+            nlohmann::json thread = admin_fetch_dm_thread(db, dm_id);
+
+            nlohmann::json out;
+            out["dm_id"] = dm_id;
+            out["messages"] = thread;
+
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::forbidden); // admin-only endpoint
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    // -----------------------------------------------------------------------
+    // 🧩 CAPTCHA proxy (frontend preview support)
+    // -----------------------------------------------------------------------
+    else if (path == "/api/rumble/latest" && method == http::verb::get) {
+        try {
+            // Parse channel from query string
+            std::string channel;
+            {
+                std::istringstream qs(query_string);
+                std::string kv;
+                while (std::getline(qs, kv, '&')) {
+                    auto eq = kv.find('=');
+                    if (eq == std::string::npos) continue;
+                    std::string key = kv.substr(0, eq);
+                    std::string val = kv.substr(eq + 1);
+                    if (key == "channel") {
+                        channel = val;
+                        break;
+                    }
+                }
+            }
+            
+            if (channel.empty()) {
+                throw std::runtime_error("missing channel parameter");
+            }
+            
+            // Get latest video from cache or fetch
+            RumbleCacheEntry entry = get_rumble_latest(channel);
+            
+            // Format timestamp
+            auto time_t_now = std::chrono::system_clock::now();
+            std::time_t tt = std::chrono::system_clock::to_time_t(time_t_now);
+            std::tm tm = *std::gmtime(&tt);
+            char buf[32];
+            std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+            
+            // Build response
+            nlohmann::json out;
+            out["channel"] = entry.channel;
+            out["channel_url"] = entry.channel_url;
+            out["video_url"] = entry.video_url;
+            out["title"] = entry.title;
+            out["thumbnail_url"] = entry.thumbnail_url;
+            out["fetched_at"] = std::string(buf);
+            out["cache_seconds"] = entry.cache_seconds;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            log("Rumble API error: " + std::string(e.what()));
+            res.result(http::status::internal_server_error);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    else if ((target == "/captcha") && method == http::verb::post) {
+        log("[CAPTCHA] Proxy request to OpenCaptcha");
+
+        // Forward request to internal OpenCaptcha container
+        CURL *curl = curl_easy_init();
+        if (!curl) {
+            res.result(http::status::internal_server_error);
+            res.set(http::field::content_type, "text/plain");
+            res.body() = "curl init failed";
+        } else {
+            std::string response;
+            std::string url = "http://opencaptcha:8080/captcha";
+
+            // --- headers: OpenCaptcha expects JSON, we also accept jpeg back
+            struct curl_slist *hdrs = nullptr;
+            hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+            hdrs = curl_slist_append(hdrs, "Accept: image/jpeg");
+
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.body().c_str());
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(req.body().size()));
+
+            // capture binary jpeg safely
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                +[](void *ptr, size_t sz, size_t nm, void *userdata) -> size_t {
+                    auto *out = static_cast<std::string*>(userdata);
+                    out->append(static_cast<char*>(ptr), sz * nm);
+                    return sz * nm;
+                });
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+            curl_easy_setopt(curl, CURLOPT_USERAGENT, "bcord-backend/1.0");
+
+            CURLcode rc = curl_easy_perform(curl);
+            long http_code = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+            curl_slist_free_all(hdrs);
+            curl_easy_cleanup(curl);
+
+            if (rc == CURLE_OK && http_code == 200) {
+                res.result(http::status::ok);
+                res.set(http::field::content_type, "image/jpeg");
+                res.body() = std::move(response);
+            } else {
+                std::ostringstream oss;
+                oss << "captcha backend error (curl=" << rc << ", http=" << http_code << ")";
+                res.result(http::status::bad_gateway);
+                res.set(http::field::content_type, "text/plain");
+                res.body() = oss.str();
+            }
+        }
+    }
+    // -----------------------------------------------------------------------
+    // ADMIN ENDPOINTS
+    // -----------------------------------------------------------------------
+    
+    // POST /api/admin/verify - Verify admin password
+    else if (path == "/api/admin/verify" && method == http::verb::post) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            if (!j.contains("password")) {
+                throw std::runtime_error("password is required");
+            }
+            
+            std::string password = j["password"].get<std::string>();
+            
+            // Hard-coded admin password
+            const std::string ADMIN_PASSWORD = "1Qallergyccnajn01";
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::read_transaction txn(db);
+            
+            // Check if user is admin
+            auto admin_check = txn.exec_params(
+                "SELECT is_admin FROM users WHERE username = $1",
+                current_username
+            );
+            
+            if (admin_check.empty() || !admin_check[0]["is_admin"].as<bool>()) {
+                throw std::runtime_error("not an admin");
+            }
+            
+            // Verify password
+            if (password != ADMIN_PASSWORD) {
+                throw std::runtime_error("invalid password");
+            }
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "admin access granted";
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::forbidden);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/admin/users - List all users (requires admin password verification)
+    else if (path == "/api/admin/users" && method == http::verb::get) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::read_transaction txn(db);
+            
+            // Check if user is admin
+            auto admin_check = txn.exec_params(
+                "SELECT is_admin FROM users WHERE username = $1",
+                current_username
+            );
+            
+            if (admin_check.empty() || !admin_check[0]["is_admin"].as<bool>()) {
+                throw std::runtime_error("admin privileges required");
+            }
+            
+            // Get all users with their details
+            auto users = txn.exec(
+                "SELECT id, username, email, verified, is_admin, created_at::text "
+                "FROM users "
+                "ORDER BY created_at DESC"
+            );
+            
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& row : users) {
+                nlohmann::json item;
+                item["id"] = row["id"].as<int64_t>();
+                item["username"] = row["username"].c_str();
+                item["email"] = row["email"].c_str();
+                item["verified"] = row["verified"].as<bool>();
+                item["is_admin"] = row["is_admin"].as<bool>();
+                item["created_at"] = row["created_at"].c_str();
+                arr.push_back(item);
+            }
+            
+            nlohmann::json out;
+            out["users"] = arr;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::forbidden);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+
+    // POST /api/admin/verify-user - Manually verify a user (admin only)
+    else if (path == "/api/admin/verify-user" && method == http::verb::post) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            
+            {
+                pqxx::read_transaction txn(db);
+                auto admin_check = txn.exec_params(
+                    "SELECT is_admin FROM users WHERE username = $1",
+                    current_username
+                );
+                
+                if (admin_check.empty() || !admin_check[0]["is_admin"].as<bool>()) {
+                    throw std::runtime_error("admin privileges required");
+                }
+            }
+            
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            if (!j.contains("user_id")) {
+                throw std::runtime_error("user_id is required");
+            }
+            
+            int64_t user_id = j["user_id"].get<int64_t>();
+            
+            pqxx::work txn(db);
+            auto result = txn.exec_params(
+                "UPDATE users SET verified = true WHERE id = $1 RETURNING username",
+                user_id
+            );
+            
+            if (result.empty()) {
+                throw std::runtime_error("user not found");
+            }
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "user verified successfully";
+            out["username"] = result[0]["username"].c_str();
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+
+    // DELETE /api/admin/users/:id - Delete a user (admin only)
+    else if (path.rfind("/api/admin/users/", 0) == 0 && method == http::verb::delete_) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            std::string id_str = path.substr(17);
+            int64_t user_id = std::stoll(id_str);
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            
+            {
+                pqxx::read_transaction txn(db);
+                auto admin_check = txn.exec_params(
+                    "SELECT is_admin FROM users WHERE username = $1",
+                    current_username
+                );
+                
+                if (admin_check.empty() || !admin_check[0]["is_admin"].as<bool>()) {
+                    throw std::runtime_error("admin privileges required");
+                }
+            }
+            
+            pqxx::work txn(db);
+            
+            txn.exec_params("DELETE FROM direct_messages WHERE sender_id = $1", user_id);
+            txn.exec_params("DELETE FROM direct_conversations WHERE user1_id = $1 OR user2_id = $1", user_id);
+            txn.exec_params("DELETE FROM user_dm_reads WHERE user_id = $1", user_id);
+            txn.exec_params("DELETE FROM user_friends WHERE user_id = $1 OR friend_id = $1", user_id);
+            txn.exec_params("DELETE FROM user_profiles WHERE user_id = $1", user_id);
+            txn.exec_params("DELETE FROM user_settings WHERE user_id = $1", user_id);
+            txn.exec_params("DELETE FROM user_backup_codes WHERE user_id = $1", user_id);
+            txn.exec_params("DELETE FROM login_history WHERE user_id = $1", user_id);
+            txn.exec_params("DELETE FROM sessions WHERE user_id = $1", user_id);
+            txn.exec_params("DELETE FROM password_resets WHERE user_id = $1", user_id);
+            
+            auto user_result = txn.exec_params(
+                "SELECT username FROM users WHERE id = $1",
+                user_id
+            );
+            
+            if (user_result.empty()) {
+                throw std::runtime_error("user not found");
+            }
+            
+            std::string deleted_username = user_result[0]["username"].c_str();
+            
+            txn.exec_params("DELETE FROM messages WHERE sender = $1", deleted_username);
+            txn.exec_params("DELETE FROM server_members WHERE username = $1", deleted_username);
+            txn.exec_params("DELETE FROM users WHERE id = $1", user_id);
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "user deleted successfully";
+            out["username"] = deleted_username;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+        // -----------------------------------------------------------------------
+    // SERVER MANAGEMENT ENDPOINTS
+    // -----------------------------------------------------------------------
+    
+    // POST /api/servers/create - Create new server
+    else if (path == "/api/servers/create" && method == http::verb::post) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            if (!j.contains("name") || !j.contains("initials")) {
+                throw std::runtime_error("name and initials are required");
+            }
+            
+            std::string name = j["name"].get<std::string>();
+            std::string initials = j["initials"].get<std::string>();
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::work txn(db);
+            
+            // Create server
+            auto server_result = txn.exec_params(
+                "INSERT INTO servers (name, initials, owner_username) "
+                "VALUES ($1, $2, $3) "
+                "RETURNING id",
+                name, initials, current_username
+            );
+            
+            int64_t server_id = server_result[0]["id"].as<int64_t>();
+            
+            // Create default #general channel for this server
+            auto channel_result = txn.exec_params(
+                "INSERT INTO channels (server_id, name) "
+                "VALUES ($1, 'general') "
+                "RETURNING id",
+                server_id
+            );
+            
+            int64_t channel_id = channel_result[0]["id"].as<int64_t>();
+            
+            // Add creator as owner member
+            txn.exec_params(
+                "INSERT INTO server_members (server_id, username, role) "
+                "VALUES ($1, $2, 'owner')",
+                server_id, current_username
+            );
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["server_id"] = server_id;
+            out["name"] = name;
+            out["initials"] = initials;
+            out["default_channel_id"] = channel_id;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/servers/list - List servers for current user
+    else if (path == "/api/servers/list" && method == http::verb::get) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::read_transaction txn(db);
+            
+            // Get all servers where user is a member
+            auto servers = txn.exec_params(
+                "SELECT s.id, s.name, s.initials, s.created_at, sm.role "
+                "FROM servers s "
+                "JOIN server_members sm ON sm.server_id = s.id "
+                "WHERE sm.username = $1 "
+                "ORDER BY s.id ASC",
+                current_username
+            );
+            
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& row : servers) {
+                nlohmann::json item;
+                item["id"] = row["id"].as<int64_t>();
+                item["name"] = row["name"].c_str();
+                item["initials"] = row["initials"].c_str();
+                item["created_at"] = row["created_at"].c_str();
+                item["role"] = row["role"].c_str();
+                arr.push_back(item);
+            }
+            
+            nlohmann::json out;
+            out["servers"] = arr;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/servers/:id/channels - Get channels for a specific server
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/channels") != std::string::npos && 
+             method == http::verb::get) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // Extract server_id from path: /api/servers/123/channels
+            std::string prefix = "/api/servers/";
+            std::string suffix = "/channels";
+            size_t start = prefix.length();
+            size_t end = path.find(suffix, start);
+            
+            if (end == std::string::npos) {
+                throw std::runtime_error("invalid path format");
+            }
+            
+            std::string server_id_str = path.substr(start, end - start);
+            int64_t server_id = std::stoll(server_id_str);
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::read_transaction txn(db);
+            
+            // Verify user has access to this server
+            auto access_check = txn.exec_params(
+                "SELECT 1 FROM server_members "
+                "WHERE server_id = $1 AND username = $2",
+                server_id, current_username
+            );
+            
+            if (access_check.empty()) {
+                throw std::runtime_error("access denied to this server");
+            }
+            
+            // Get all channels for this server
+            auto channels = txn.exec_params(
+                "SELECT id, name "
+                "FROM channels "
+                "WHERE server_id = $1 "
+                "ORDER BY id ASC",
+                server_id
+            );
+            
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& row : channels) {
+                nlohmann::json item;
+                item["id"] = row["id"].as<int64_t>();
+                item["name"] = row["name"].c_str();
+                arr.push_back(item);
+            }
+            
+            nlohmann::json out;
+            out["channels"] = arr;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+        // GET /api/users/list - List all registered users
+    else if (path == "/api/users/list" && method == http::verb::get) {
+        try {
+            std::string current_username = authenticate_request(req);
+            (void)current_username; // Authentication check only
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::read_transaction txn(db);
+            
+            // Get all verified users
+            auto users = txn.exec(
+                "SELECT username, created_at "
+                "FROM users "
+                "WHERE verified = TRUE "
+                "ORDER BY username ASC"
+            );
+            
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& row : users) {
+                nlohmann::json item;
+                item["username"] = row["username"].c_str();
+                item["created_at"] = row["created_at"].c_str();
+                arr.push_back(item);
+            }
+            
+            nlohmann::json out;
+            out["users"] = arr;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::internal_server_error);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+        // -----------------------------------------------------------------------
+    // ADMIN: List all users
+    // -----------------------------------------------------------------------
+    else if (path == "/api/admin/users" && method == http::verb::post) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // Parse password from request body
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            if (!j.contains("password")) {
+                throw std::runtime_error("password required");
+            }
+            
+            std::string password = j["password"].get<std::string>();
+            
+            // Hardcoded password check
+            if (password != "1Qallergyccnajn01") {
+                throw std::runtime_error("invalid password");
+            }
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            
+            // Check if current user is admin
+            pqxx::read_transaction txn(db);
+            auto admin_check = txn.exec_params(
+                "SELECT is_admin FROM users WHERE username = $1",
+                current_username
+            );
+            
+            if (admin_check.empty() || !admin_check[0]["is_admin"].as<bool>()) {
+                throw std::runtime_error("admin privileges required");
+            }
+            
+            // Get all users
+            auto users = txn.exec(
+                "SELECT username, verified, is_admin, created_at "
+                "FROM users "
+                "ORDER BY username"
+            );
+            
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& row : users) {
+                nlohmann::json item;
+                item["username"] = row["username"].c_str();
+                item["verified"] = row["verified"].as<bool>();
+                item["is_admin"] = row["is_admin"].as<bool>();
+                item["created_at"] = row["created_at"].c_str();
+                arr.push_back(item);
+            }
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["users"] = arr;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::forbidden);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+
+    
+    // -----------------------------------------------------------------------
+    // CHANNEL & SERVER MANAGEMENT ENDPOINTS
+    // -----------------------------------------------------------------------
+    
+    // POST /api/servers/:id/channels - Create new channel in a server
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/channels") == path.length() - 9 && 
+             method == http::verb::post) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // Extract server_id from path: /api/servers/123/channels
+            std::string prefix = "/api/servers/";
+            std::string suffix = "/channels";
+            size_t start = prefix.length();
+            size_t end = path.find(suffix, start);
+            
+            if (end == std::string::npos) {
+                throw std::runtime_error("invalid path format");
+            }
+            
+            std::string server_id_str = path.substr(start, end - start);
+            int64_t server_id = std::stoll(server_id_str);
+            
+            // Parse request body for channel name
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            if (!j.contains("name")) {
+                throw std::runtime_error("channel name is required");
+            }
+            
+            std::string channel_name = j["name"].get<std::string>();
+            
+            // Validate channel name (lowercase, alphanumeric + hyphens)
+            if (channel_name.empty() || channel_name.length() > 100) {
+                throw std::runtime_error("channel name must be 1-100 characters");
+            }
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::work txn(db);
+            
+            // Verify user has owner/admin role on this server
+            auto role_check = txn.exec_params(
+                "SELECT role FROM server_members "
+                "WHERE server_id = $1 AND username = $2",
+                server_id, current_username
+            );
+            
+            if (role_check.empty()) {
+                throw std::runtime_error("access denied to this server");
+            }
+            
+            std::string role = role_check[0]["role"].c_str();
+            if (role != "owner" && role != "admin") {
+                throw std::runtime_error("only server owners/admins can create channels");
+            }
+            
+            // Check if channel already exists
+            auto exists_check = txn.exec_params(
+                "SELECT 1 FROM channels WHERE server_id = $1 AND name = $2",
+                server_id, channel_name
+            );
+            
+            if (!exists_check.empty()) {
+                throw std::runtime_error("channel already exists");
+            }
+            
+            // Create channel
+            auto channel_result = txn.exec_params(
+                "INSERT INTO channels (server_id, name) "
+                "VALUES ($1, $2) "
+                "RETURNING id",
+                server_id, channel_name
+            );
+            
+            int64_t channel_id = channel_result[0]["id"].as<int64_t>();
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["channel_id"] = channel_id;
+            out["name"] = channel_name;
+            out["server_id"] = server_id;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // DELETE /api/servers/:id/channels/:name - Delete a channel
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/channels/") != std::string::npos && 
+             method == http::verb::delete_) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // Extract server_id and channel_name from path: /api/servers/123/channels/general
+            std::string prefix = "/api/servers/";
+            std::string mid = "/channels/";
+            
+            size_t server_start = prefix.length();
+            size_t server_end = path.find(mid, server_start);
+            
+            if (server_end == std::string::npos) {
+                throw std::runtime_error("invalid path format");
+            }
+            
+            std::string server_id_str = path.substr(server_start, server_end - server_start);
+            int64_t server_id = std::stoll(server_id_str);
+            
+            size_t channel_start = server_end + mid.length();
+            std::string channel_name = path.substr(channel_start);
+            
+            if (channel_name.empty()) {
+                throw std::runtime_error("channel name is required");
+            }
+            
+            // Prevent deletion of #general channel
+            if (channel_name == "general") {
+                throw std::runtime_error("cannot delete the general channel");
+            }
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::work txn(db);
+            
+            // Verify user has owner/admin role on this server
+            auto role_check = txn.exec_params(
+                "SELECT role FROM server_members "
+                "WHERE server_id = $1 AND username = $2",
+                server_id, current_username
+            );
+            
+            if (role_check.empty()) {
+                throw std::runtime_error("access denied to this server");
+            }
+            
+            std::string role = role_check[0]["role"].c_str();
+            if (role != "owner" && role != "admin") {
+                throw std::runtime_error("only server owners/admins can delete channels");
+            }
+            
+            // Get channel ID
+            auto channel_check = txn.exec_params(
+                "SELECT id FROM channels WHERE server_id = $1 AND name = $2",
+                server_id, channel_name
+            );
+            
+            if (channel_check.empty()) {
+                throw std::runtime_error("channel not found");
+            }
+            
+            int64_t channel_id = channel_check[0]["id"].as<int64_t>();
+            
+            // Delete all messages in this channel
+            txn.exec_params(
+                "DELETE FROM messages WHERE channel_id = $1",
+                channel_id
+            );
+            
+            // Delete the channel
+            txn.exec_params(
+                "DELETE FROM channels WHERE id = $1",
+                channel_id
+            );
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "channel deleted successfully";
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // DELETE /api/servers/:id - Delete a server
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/channels") == std::string::npos &&
+             path.find("/", 14) == std::string::npos &&
+             method == http::verb::delete_) {
+        try {
+            std::string current_username = authenticate_request(req);
+            
+            // Extract server_id from path: /api/servers/123
+            std::string prefix = "/api/servers/";
+            size_t start = prefix.length();
+            std::string server_id_str = path.substr(start);
+            int64_t server_id = std::stoll(server_id_str);
+            
+            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
+            // OLD: pqxx::connection db(PG_CONN);
+            PooledConnection db(*g_db_pool);
+            pqxx::work txn(db);
+            
+            // Verify user is the server owner
+            auto owner_check = txn.exec_params(
+                "SELECT owner_username FROM servers WHERE id = $1",
+                server_id
+            );
+            
+            if (owner_check.empty()) {
+                throw std::runtime_error("server not found");
+            }
+            
+            std::string owner = owner_check[0]["owner_username"].c_str();
+            if (owner != current_username) {
+                throw std::runtime_error("only the server owner can delete the server");
+            }
+            
+            // Get all channel IDs for this server
+            auto channels = txn.exec_params(
+                "SELECT id FROM channels WHERE server_id = $1",
+                server_id
+            );
+            
+            // Delete all messages in all channels
+            for (const auto& row : channels) {
+                int64_t channel_id = row["id"].as<int64_t>();
+                txn.exec_params(
+                    "DELETE FROM messages WHERE channel_id = $1",
+                    channel_id
+                );
+            }
+            
+            // Delete all channels
+            txn.exec_params(
+                "DELETE FROM channels WHERE server_id = $1",
+                server_id
+            );
+            
+            // Delete all server members
+            txn.exec_params(
+                "DELETE FROM server_members WHERE server_id = $1",
+                server_id
+            );
+            
+            // Delete the server
+            txn.exec_params(
+                "DELETE FROM servers WHERE id = $1",
+                server_id
+            );
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "server deleted successfully";
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+
+    // =========================================================================
+    // STUB ENDPOINTS - Added 2025-12-19
+    // These return empty/success responses to prevent frontend 404 errors
+    // TODO: Implement full functionality later
+    // =========================================================================
+
+    // GET /api/invitations - List pending invitations (stub)
+    else if (path == "/api/invitations" && method == http::verb::get) {
+        nlohmann::json out;
+        out["invitations"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/invitations/:id/accept - Accept invitation (stub)
+    else if (path.rfind("/api/invitations/", 0) == 0 && 
+             path.find("/accept") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "invitation accepted";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/invitations/:id/decline - Decline invitation (stub)
+    else if (path.rfind("/api/invitations/", 0) == 0 && 
+             path.find("/decline") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "invitation declined";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // GET /api/users/online - List online users (stub)
+    else if (path == "/api/users/online" && method == http::verb::get) {
+        nlohmann::json out;
+        out["online"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // GET /api/servers/:id/unread - Get unread status for server (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/unread") != std::string::npos && 
+             method == http::verb::get) {
+        nlohmann::json out;
+        out["channels"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/servers/:id/invite - Invite user to server (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/invite") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "invitation sent";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/servers/:id/leave - Leave server (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/leave") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "left server";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // GET /api/servers/:id/members - Get server members (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/members") != std::string::npos && 
+             method == http::verb::get) {
+        nlohmann::json out;
+        out["members"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/channels/:id/mark-read - Mark channel as read (stub)
+    else if (path.rfind("/api/channels/", 0) == 0 && 
+             path.find("/mark-read") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+
+
+    else {
+        res.result(http::status::not_found);
+        res.set(http::field::content_type, "application/json");
+        res.body() = R"({"status":"error","message":"Not Found"})";
+    }
+
+    res.prepare_payload();
+    http::write(stream, res);
+}  // ✅ closes handle_request()
+
+
+// ---------------------------------------------------------------------------
+// Session Dispatcher
+// ---------------------------------------------------------------------------
+static void do_session(tcp::socket socket) {
+    try {
+        beast::flat_buffer buffer;
+        http::request<http::string_body> req;
+        http::read(socket, buffer, req);
+        handle_request(req, socket);
+    } catch (const std::exception &e) {
+        log(std::string("[Session] Error: ") + e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+int main() {
+    log("🚀 BCord backend starting...");
+    init_database();
+    // ADDED 2025-12-19: Initialize connection pool after database check
+    init_connection_pool();
+
+    if (!initialize_schema()) {
+        log("❌ Failed to initialize schema");
+        return 1;
+    }
+    log("✅ Schema initialized");
+
+    try {
+        net::io_context ioc{1};
+        tcp::acceptor acceptor(ioc, {net::ip::make_address("0.0.0.0"), 9000});
+        log("✅ Port 9000 bound successfully");
+        for (;;) {
+            tcp::socket socket(ioc);
+            acceptor.accept(socket);
+            std::thread(&do_session, std::move(socket)).detach();
+        }
+    } catch (const std::exception &e) {
+        log(std::string("[Fatal] ") + e.what());
+        return 1;
+    }
+}
