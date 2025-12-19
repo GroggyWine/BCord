@@ -1213,41 +1213,62 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
     // 🧩 CAPTCHA proxy (frontend preview support)
     // -----------------------------------------------------------------------
     // -----------------------------------------------------------------------
-    // Rumble Lineup - Fetch multiple channels
+    // Rumble Lineup - Bryan's custom lineup
     // -----------------------------------------------------------------------
     else if (path == "/api/rumble/lineup" && method == http::verb::get) {
         try {
-            // Predefined list of channels to fetch
-            std::vector<std::string> channels = {
-                "Bongino",
-                "russellbrand", 
-                "Timcast",
-                "GLennBeckProgram",
-                "dineshdsouza",
-                "StevenCrowder",
-                "TuckerCarlson",
-                "TheDanBonginoShow"
-            };
-            
             nlohmann::json lineup = nlohmann::json::array();
             
-            for (const auto& channel : channels) {
-                try {
-                    RumbleCacheEntry entry = get_rumble_latest(channel);
-                    
-                    nlohmann::json item;
-                    item["name"] = entry.channel;
-                    item["channelId"] = entry.channel;
-                    item["title"] = entry.title;
-                    item["url"] = entry.video_url;
-                    item["thumbnail"] = entry.thumbnail_url;
-                    item["isLive"] = false;
-                    item["type"] = "video";
-                    
-                    lineup.push_back(item);
-                } catch (const std::exception& e) {
-                    log("Rumble lineup - failed to fetch " + channel + ": " + e.what());
-                }
+            // 1. SaltyCracker channel
+            try {
+                RumbleCacheEntry entry = get_rumble_latest("SaltyCracker");
+                nlohmann::json item;
+                item["name"] = entry.channel;
+                item["channelId"] = entry.channel;
+                item["title"] = entry.title;
+                item["url"] = entry.video_url;
+                item["thumbnail"] = entry.thumbnail_url;
+                item["isLive"] = false;
+                item["type"] = "video";
+                lineup.push_back(item);
+            } catch (const std::exception& e) {
+                log("Rumble lineup - failed to fetch SaltyCracker: " + std::string(e.what()));
+            }
+            
+            // 2. StevenCrowder channel
+            try {
+                RumbleCacheEntry entry = get_rumble_latest("StevenCrowder");
+                nlohmann::json item;
+                item["name"] = entry.channel;
+                item["channelId"] = entry.channel;
+                item["title"] = entry.title;
+                item["url"] = entry.video_url;
+                item["thumbnail"] = entry.thumbnail_url;
+                item["isLive"] = false;
+                item["type"] = "video";
+                lineup.push_back(item);
+            } catch (const std::exception& e) {
+                log("Rumble lineup - failed to fetch StevenCrowder: " + std::string(e.what()));
+            }
+            
+            // 3. Infowars 24/7 Live Feed (specific video URL)
+            try {
+                std::string infowars_url = "https://rumble.com/v6xkx0a-infowars-network-feed-live-247.html";
+                std::string oembed_url = "https://rumble.com/api/Media/oembed.json?url=" + url_encode(infowars_url);
+                std::string oembed_json = https_get(oembed_url);
+                auto oembed = nlohmann::json::parse(oembed_json);
+                
+                nlohmann::json item;
+                item["name"] = "Infowars";
+                item["channelId"] = "Infowars";
+                item["title"] = oembed.value("title", "Infowars Network Feed - LIVE 24/7");
+                item["url"] = infowars_url;
+                item["thumbnail"] = oembed.value("thumbnail_url", "");
+                item["isLive"] = true;
+                item["type"] = "live";
+                lineup.push_back(item);
+            } catch (const std::exception& e) {
+                log("Rumble lineup - failed to fetch Infowars: " + std::string(e.what()));
             }
             
             nlohmann::json out;
