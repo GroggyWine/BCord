@@ -45,3 +45,26 @@ site/
 coverage/
 *.test
 
+
+# Backup files (created during maintenance)
+*.backup
+*.backup.*
+*.bak
+*.orig
+*.truncated
+*.working
+*.git_original
+
+# Test files
+test.jpg
+captcha.jpg
+cookies.txt
+
+# Build artifacts
+bcord-client/build
+bcord-client/vite
+
+# Private keys (NEVER commit to git)
+*.private
+*.key
+mail/dkim/keys/

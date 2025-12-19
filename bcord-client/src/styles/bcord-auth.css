@@ -1,0 +1,351 @@
+/* Auth layout + dark theme card for login/register/verify */
+
+.bcord-auth-page {
+  min-height: 100vh;
+  background: radial-gradient(circle at top, #111827 0, #020617 55%);
+  color: #e5e7eb;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+}
+
+.bcord-auth-shell {
+  max-width: 420px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.bcord-auth-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.bcord-logo-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #6366f1, #14b8a6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  font-size: 18px;
+  color: #0b1020;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.6), 0 8px 24px rgba(15, 23, 42, 0.6);
+}
+
+.bcord-logo-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bcord-logo-main {
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.bcord-logo-sub {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.bcord-auth-main {
+  width: 100%;
+}
+
+.bcord-auth-card {
+  background: radial-gradient(circle at top left, #111827 0, #020617 70%);
+  border-radius: 18px;
+  padding: 22px 20px 20px;
+  box-shadow:
+    0 18px 45px rgba(15, 23, 42, 0.9),
+    0 0 0 1px rgba(148, 163, 184, 0.12);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.bcord-auth-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.bcord-auth-subtitle {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: #9ca3af;
+  line-height: 1.4;
+}
+
+.bcord-auth-footer {
+  font-size: 11px;
+  color: #6b7280;
+  text-align: center;
+}
+
+/* Form elements */
+
+.bcord-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bcord-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bcord-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bcord-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.bcord-label-hint {
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.bcord-input {
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  padding: 8px 10px;
+  font-size: 13px;
+  background: rgba(15, 23, 42, 0.9);
+  color: #e5e7eb;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+
+.bcord-input::placeholder {
+  color: #6b7280;
+}
+
+.bcord-input:focus {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.7);
+  background: rgba(15, 23, 42, 1);
+}
+
+/* Error / success */
+
+.bcord-error {
+  background: rgba(239, 68, 68, 0.1);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #fecaca;
+  border: 1px solid rgba(248, 113, 113, 0.6);
+}
+
+.bcord-success {
+  background: rgba(34, 197, 94, 0.08);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #bbf7d0;
+  border: 1px solid rgba(74, 222, 128, 0.6);
+}
+
+/* Button */
+
+.bcord-button {
+  border-radius: 999px;
+  border: none;
+  margin-top: 4px;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  background: linear-gradient(135deg, #6366f1, #14b8a6);
+  color: #0b1020;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  transition: transform 0.08s ease, box-shadow 0.08s ease, opacity 0.08s ease;
+  box-shadow:
+    0 10px 28px rgba(15, 23, 42, 0.8),
+    0 0 0 1px rgba(15, 23, 42, 0.6);
+}
+
+.bcord-button:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 16px 36px rgba(15, 23, 42, 0.95),
+    0 0 0 1px rgba(15, 23, 42, 0.8);
+}
+
+.bcord-button:active {
+  transform: translateY(0);
+  box-shadow:
+    0 8px 22px rgba(15, 23, 42, 0.8),
+    0 0 0 1px rgba(15, 23, 42, 0.8);
+}
+
+.bcord-button[disabled] {
+  opacity: 0.6;
+  cursor: default;
+  transform: none;
+  box-shadow:
+    0 6px 16px rgba(15, 23, 42, 0.7),
+    0 0 0 1px rgba(15, 23, 42, 0.8);
+}
+
+/* Links / helper text */
+
+.bcord-helper-row {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #9ca3af;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bcord-link {
+  color: #a5b4fc;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.bcord-link:hover {
+  text-decoration: underline;
+}
+
+/* Tiny text */
+
+.bcord-small {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+/* Code input layout for 6-digit verification code */
+.bcord-code-input {
+  letter-spacing: 0.32em;
+  text-align: center;
+  font-weight: 500;
+}
+
+/* CAPTCHA styles */
+
+.bcord-captcha-slot {
+  margin-top: 4px;
+  margin-bottom: 6px;
+}
+
+.bcord-captcha-box {
+  margin-top: 4px;
+  padding: 10px 10px 8px;
+  border-radius: 12px;
+  border: 1px solid rgba(30, 64, 175, 0.6);
+  background: radial-gradient(circle at top left, #020617, #020617 70%);
+}
+
+
+.bcord-captcha-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 8px;
+  margin-bottom: 10px;
+}
+
+.bcord-captcha-image-wrap {
+  margin-top: 8px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(55, 65, 81, 0.6);
+  background: #0f172a;
+}
+
+.bcord-captcha-image {
+  width: 100%;
+  min-height: 80px;
+  display: block;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  transform: scale(1.5);
+  transform-origin: center center;
+}
+
+.bcord-captcha-image:hover {
+  opacity: 0.85;
+}
+
+.bcord-captcha-placeholder {
+  width: 100%;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0f172a;
+  color: #64748b;
+  font-size: 14px;
+}
+.bcord-captcha-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bcord-captcha-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.bcord-captcha-input-row .bcord-input {
+  flex: 1;
+}
+
+.bcord-captcha-refresh-btn {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(30, 64, 175, 0.8);
+  background: linear-gradient(135deg, #1e40af, #1e3a8a);
+  color: #e0e7ff;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.bcord-captcha-refresh-btn:hover {
+  background: linear-gradient(135deg, #2563eb, #1e40af);
+  border-color: rgba(59, 130, 246, 0.9);
+  box-shadow: 0 4px 8px rgba(37, 99, 235, 0.3);
+  transform: translateY(-1px);
+}
+
+.bcord-captcha-refresh-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.bcord-captcha-input-wrap {
+  margin-top: 8px;
+}
+
+.bcord-captcha-msg {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #94a3b8;
+  font-style: italic;
+}

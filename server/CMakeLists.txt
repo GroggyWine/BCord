@@ -17,8 +17,10 @@ pkg_check_modules(PQXX    REQUIRED libpqxx)
 # Source
 add_executable(BCordServer
   src/main.cpp
-  # If you later split auth to src/auth.cpp, add it here:
-  # src/auth.cpp
+  src/db_init.cpp
+  src/send_email.cpp
+  src/email_templates.cpp
+  src/totp_utils.cpp
 )
 
 # Include dirs
@@ -53,4 +55,3 @@ set_target_properties(BCordServer PROPERTIES
   BUILD_RPATH "/usr/local/lib"
   INSTALL_RPATH "/usr/local/lib"
 )
-

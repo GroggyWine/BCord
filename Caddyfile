@@ -1,12 +1,33 @@
+# =============================================================================
+# BeKord - Caddy Web Server Configuration
+# =============================================================================
+# UPDATED: 2025-12-19
+# 
+# CHANGE LOG:
+# -----------
+# 2025-12-19: Added bekord.com as primary domain (was only b-cord.run.place)
+#             - bekord.com/www.bekord.com: Primary site with full config
+#             - b-cord.run.place now redirects to bekord.com
+#             - Updated CSP headers for bekord.com WebSocket connections
+#             - Added grafana.bekord.com and prometheus.bekord.com subdomains
+#
+# 2025-12-19: Added rate limiting for security
+#             - auth_zone: 10 req/min for /api/auth/* endpoints
+#             - api_zone: 100 req/min for general API
+# =============================================================================
+
 {
-    email admin@b-cord.run.place
+    email admin@bekord.com
     acme_ca https://acme.zerossl.com/v2/DV90
+    
+    # Rate limit module ordering
+    order rate_limit before basicauth
 }
 
 # -----------------------------------------------------------------------------
-# HTTP listener for ACME challenges + HTTP→HTTPS redirects
+# HTTP listener for ACME challenges + HTTP→HTTPS redirects (ALL DOMAINS)
 # -----------------------------------------------------------------------------
-http://b-cord.run.place, http://www.b-cord.run.place {
+http://bekord.com, http://www.bekord.com, http://b-cord.run.place, http://www.b-cord.run.place {
     handle_path /.well-known/acme-challenge/* {
         root * /var/lib/caddy/.local/share/caddy/acme
         file_server
@@ -15,12 +36,13 @@ http://b-cord.run.place, http://www.b-cord.run.place {
     redir https://{host}{uri} permanent
 }
 
-https://b-cord.run.place, https://www.b-cord.run.place {
+# -----------------------------------------------------------------------------
+# MAIN SITE: bekord.com (PRIMARY DOMAIN)
+# -----------------------------------------------------------------------------
+https://bekord.com, https://www.bekord.com {
     encode zstd gzip
 
-    # -------------------------------------------------------------------------
-    # Global security + CORS headers (CSRF-aware)
-    # -------------------------------------------------------------------------
+    # Security + CORS headers
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -30,7 +52,7 @@ https://b-cord.run.place, https://www.b-cord.run.place {
         Cross-Origin-Opener-Policy "same-origin"
         Cross-Origin-Resource-Policy "same-site"
         Cross-Origin-Embedder-Policy "require-corp"
-        Content-Security-Policy "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss://b-cord.run.place https://b-cord.run.place"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss://bekord.com wss://www.bekord.com https://bekord.com https://www.bekord.com"
         Access-Control-Allow-Origin https://{host}
         Access-Control-Allow-Credentials true
         Access-Control-Allow-Headers "Authorization, Content-Type"
@@ -38,6 +60,7 @@ https://b-cord.run.place, https://www.b-cord.run.place {
         Vary "Origin"
     }
 
+    # CORS preflight handler
     @cors_preflight {
         method OPTIONS
     }
@@ -52,12 +75,35 @@ https://b-cord.run.place, https://www.b-cord.run.place {
         respond "" 204
     }
 
-    @api path /api/*
-    reverse_proxy @api bcord-backend:9000
+    # Rate limiting: Authentication endpoints (10 req/min - brute force protection)
+    @auth_endpoints {
+        path /api/auth/login /api/auth/register /api/auth/forgot-password /api/auth/reset-password
+    }
+    handle @auth_endpoints {
+        rate_limit {
+            zone auth_zone {
+                key {remote_host}
+                events 10
+                window 1m
+            }
+        }
+        reverse_proxy bcord-backend:9000
+    }
 
-    # -------------------------------------------------------------------------
-    # Prometheus scrape endpoint exposed via HTTPS
-    # -------------------------------------------------------------------------
+    # Rate limiting: General API (100 req/min)
+    @api path /api/*
+    handle @api {
+        rate_limit {
+            zone api_zone {
+                key {remote_host}
+                events 100
+                window 1m
+            }
+        }
+        reverse_proxy bcord-backend:9000
+    }
+
+    # Prometheus metrics endpoint
     handle_path /metrics {
         header {
             Content-Type "text/plain; version=0.0.4"
@@ -66,31 +112,23 @@ https://b-cord.run.place, https://www.b-cord.run.place {
         reverse_proxy bcord-backend:9000
     }
 
-    # -------------------------------------------------------------------------
-    # CAPTCHA proxy (binary-safe)
-    # -------------------------------------------------------------------------
+    # CAPTCHA proxy
     handle_path /captcha* {
         reverse_proxy bcord-backend:9000
     }
 
-    # -------------------------------------------------------------------------
     # WebSocket upgrades
-    # -------------------------------------------------------------------------
     @ws path /ws*
     reverse_proxy @ws bcord-backend:9000
 
-    # -------------------------------------------------------------------------
-    # Static frontend (React build output)
-    # -------------------------------------------------------------------------
+    # Static frontend (React SPA) - serves index.html for all routes
     handle {
         root * /srv/bcord/site
         try_files {path} /index.html
         file_server
     }
 
-    # -------------------------------------------------------------------------
-    # Access logging for observability
-    # -------------------------------------------------------------------------
+    # Access logging
     log {
         output file /data/access.log {
             roll_size 10MiB
@@ -100,9 +138,16 @@ https://b-cord.run.place, https://www.b-cord.run.place {
 }
 
 # -----------------------------------------------------------------------------
-# Monitoring dashboards (HTTPS explicitly defined)
+# LEGACY DOMAIN: b-cord.run.place (redirects to bekord.com)
 # -----------------------------------------------------------------------------
-grafana.b-cord.run.place {
+https://b-cord.run.place, https://www.b-cord.run.place {
+    redir https://bekord.com{uri} permanent
+}
+
+# -----------------------------------------------------------------------------
+# Monitoring: Grafana Dashboard
+# -----------------------------------------------------------------------------
+grafana.bekord.com, grafana.b-cord.run.place {
     encode zstd gzip
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -112,7 +157,10 @@ grafana.b-cord.run.place {
     reverse_proxy bcord-grafana:3000
 }
 
-prometheus.b-cord.run.place {
+# -----------------------------------------------------------------------------
+# Monitoring: Prometheus
+# -----------------------------------------------------------------------------
+prometheus.bekord.com, prometheus.b-cord.run.place {
     encode zstd gzip
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Verify your BCord account</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #050816;
+      color: #E6E9EF;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .outer {
+      width: 100%;
+      padding: 32px 0;
+    }
+    .card {
+      max-width: 520px;
+      margin: 0 auto;
+      background: radial-gradient(circle at top left, #2E5EFF 0%, #050816 55%, #0A1020 100%);
+      border-radius: 16px;
+      padding: 32px 28px 28px;
+      box-shadow: 0 18px 45px rgba(0,0,0,0.55);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      letter-spacing: 0.03em;
+    }
+    p {
+      margin: 0 0 12px;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+    .code {
+      margin: 20px 0;
+      text-align: center;
+      font-size: 32px;
+      letter-spacing: 0.25em;
+      font-weight: 700;
+      padding: 16px 12px;
+      border-radius: 12px;
+      background: rgba(5, 8, 22, 0.85);
+      border: 1px solid rgba(233, 218, 130, 0.45);
+      color: #F7F4D3;
+    }
+    .meta {
+      font-size: 12px;
+      color: #A7AEC7;
+      margin-top: 12px;
+    }
+    .brand {
+      margin-top: 24px;
+      font-size: 12px;
+      color: #6F76A1;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="outer">
+    <div class="card">
+      <h1>Welcome to BCord</h1>
+      <p>Hey {{USERNAME}},</p>
+      <p>
+        Here’s your verification code. Think of it like a single B chord ringing out:
+        one clean note that opens the door to your account.
+      </p>
+
+      <div class="code">
+        {{CODE}}
+      </div>
+
+      <p class="meta">
+        This code will expire in {{EXPIRES_MINUTES}} minutes.<br>
+        If you didn’t request this, you can safely ignore this email.
+      </p>
+
+      <div class="brand">
+        BCord • built to stay in tune
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+

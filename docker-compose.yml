@@ -12,6 +12,12 @@ services:
       dockerfile: src/Captcha.WebApi/Dockerfile
     image: opencaptcha:latest
     container_name: opencaptcha
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
     restart: unless-stopped
     environment:
       ASPNETCORE_URLS: "http://0.0.0.0:8080"
@@ -29,6 +35,12 @@ services:
    # ---- Backend ----
   bcord:
     container_name: bcord-backend
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1.0'
     image: bcord-backend:local
     restart: unless-stopped
     environment:
@@ -61,6 +73,12 @@ services:
   postgres:
     image: postgres:16
     container_name: bcord-postgres
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
     restart: unless-stopped
     environment:
       POSTGRES_DB: bcord
@@ -80,8 +98,20 @@ services:
   redis:
     image: redis:7
     container_name: bcord-redis
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    # COMMENTED OUT 2025-12-19: No memory limit was set, risking memory exhaustion
+    # OLD: command: ["redis-server", "--appendonly", "yes"]
+    # NEW: Added maxmemory 256mb and allkeys-lru eviction policy
+    # COMMENTED 2025-12-19: Added active defragmentation settings
+    # OLD: command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    # NEW: Added activedefrag and defrag thresholds to reduce memory fragmentation
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--activedefrag", "yes", "--active-defrag-threshold-lower", "10", "--active-defrag-threshold-upper", "100"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -94,6 +124,12 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:latest
     container_name: bcord-redis-exporter
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.25'
     restart: unless-stopped
     ports:
       - "9121:9121"
@@ -103,8 +139,17 @@ services:
 
   # ---- Caddy ----
   caddy:
-    image: caddy:2.8.4
+    # COMMENTED OUT 2025-12-19: Standard Caddy lacks rate_limit module
+    # OLD: image: caddy:2.8.4
+    # NEW: Using custom build with rate-limit module
+    image: caddy-ratelimit:2.8.4
     container_name: bcord-caddy
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
     restart: unless-stopped
     depends_on:
       bcord:
@@ -133,6 +178,12 @@ services:
   grafana:
     image: grafana/grafana:latest
     container_name: bcord-grafana
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: admin
@@ -149,6 +200,12 @@ services:
   prometheus:
     image: prom/prometheus:latest
     container_name: bcord-prometheus
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     restart: unless-stopped
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -162,8 +219,25 @@ services:
   watchtower:
     image: containrrr/watchtower
     container_name: bcord-watchtower
+    # ADDED 2025-12-19: Container resource limits to prevent runaway memory usage
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.25'
     restart: unless-stopped
-    command: --cleanup --interval 86400
+    # COMMENTED 2025-12-19: Added notification configuration
+    # OLD: command: --cleanup --interval 86400
+    # NEW: Added --notifications-level info for update notifications
+    command: --cleanup --interval 86400 --notifications-level info
+    # ADDED 2025-12-19: Email notification configuration
+    environment:
+      - WATCHTOWER_NOTIFICATIONS=email
+      - WATCHTOWER_NOTIFICATION_EMAIL_FROM=watchtower@bekord.com
+      - WATCHTOWER_NOTIFICATION_EMAIL_TO=admin@bekord.com
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER=bcord-smtp
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT=25
+      - WATCHTOWER_NOTIFICATION_EMAIL_DELAY=2
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
