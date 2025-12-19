@@ -12,7 +12,7 @@ export default function DmPage() {
   useTokenRefresher(10);
   
   const [dmList, setDmList] = useState([]);
-  const [selectedDmId, setSelectedDmId] = useState(null);
+  const [selectedDmId, setSelectedDmId] = useState(dmId ? Number(dmId) : null);
   const [otherUsername, setOtherUsername] = useState("");
   const [messages, setMessages] = useState([]);
   const [newBody, setNewBody] = useState("");
@@ -23,46 +23,29 @@ export default function DmPage() {
   const [onlineUsers, setOnlineUsers] = useState([]);
   
   const messagesEndRef = useRef(null);
-  const hasLoadedRef = useRef(false);
   const prevMessageCountRef = useRef(0);
-  
-  // Track the authenticated user identity for session validation
   const authenticatedUserRef = useRef(null);
   const messageInputRef = useRef(null);
 
   // Verify current session matches expected user
   const verifySession = useCallback(async () => {
     try {
-      const res = await axios.get("/api/profile", {
-        withCredentials: true,
-      });
-      
+      const res = await axios.get("/api/profile", { withCredentials: true });
       const serverUser = res.data?.user;
       
       if (!serverUser) {
-        console.warn("[Session] No user in response - session expired");
         navigate("/login");
         return false;
       }
       
-      // Check if the authenticated user changed (session hijack/crossover)
       if (authenticatedUserRef.current && authenticatedUserRef.current !== serverUser) {
-        console.error(
-          `[Session] CRITICAL: User identity changed from "${authenticatedUserRef.current}" to "${serverUser}"!`
-        );
         setSessionWarning(true);
-        
-        // Force logout to prevent session crossover
-        setTimeout(() => {
-          navigate("/login");
-        }, 3000);
-        
+        setTimeout(() => navigate("/login"), 3000);
         return false;
       }
       
       return true;
     } catch (err) {
-      console.error("[Session] Verification failed:", err);
       navigate("/login");
       return false;
     }
@@ -72,195 +55,110 @@ export default function DmPage() {
   useEffect(() => {
     async function loadUser() {
       try {
-        const res = await axios.get("/api/profile", {
-          withCredentials: true,
-        });
-        
-        if (res.data && res.data.user) {
-          const username = res.data.user;
-          authenticatedUserRef.current = username;
-          setCurrentUser(username);
-          console.log(`[Session] Authenticated as: ${username}`);
+        const res = await axios.get("/api/profile", { withCredentials: true });
+        if (res.data?.user) {
+          authenticatedUserRef.current = res.data.user;
+          setCurrentUser(res.data.user);
         } else {
-          console.error("No user in profile response - redirecting to login");
           navigate("/login");
         }
       } catch (err) {
-        console.error("Failed to load user - redirecting to login:", err);
         navigate("/login");
       }
     }
     loadUser();
   }, [navigate]);
 
-  // Initial load
+  // Load DM list and auto-select from URL
   useEffect(() => {
-    if (hasLoadedRef.current) return;
-    hasLoadedRef.current = true;
-
-    (async () => {
+    async function loadDmList() {
       try {
         const res = await axios.get("/api/dm/list", { withCredentials: true });
-        console.log("DM list response:", res.data);
         
-        // Handle different response formats
         let list = [];
         if (Array.isArray(res.data)) {
           list = res.data;
-        } else if (res.data && Array.isArray(res.data.dms)) {
+        } else if (res.data?.dms) {
           list = res.data.dms;
-        } else if (res.data && typeof res.data === 'object') {
-          // Maybe it's wrapped in another property
-          const keys = Object.keys(res.data);
-          for (const key of keys) {
-            if (Array.isArray(res.data[key])) {
-              list = res.data[key];
-              break;
-            }
-          }
         }
         
-        console.log("Processed DM list:", list);
         setDmList(list);
         
-        if (dmId && list.length > 0) {
+        // Auto-select DM from URL parameter
+        if (dmId) {
           const targetId = Number(dmId);
           const match = list.find(d => d.dm_id === targetId);
           if (match) {
-            console.log("Found matching DM:", match);
             setSelectedDmId(targetId);
             setOtherUsername(match.other_username || "Unknown");
-          } else {
-            console.warn("DM not found in list:", targetId);
           }
         }
       } catch (err) {
-        console.error("Load error:", err);
+        console.error("Load DM list error:", err);
       } finally {
         setLoading(false);
       }
-    })();
+    }
+    loadDmList();
   }, [dmId]);
 
-  // Load messages with session verification
+  // Load messages when DM is selected
   useEffect(() => {
     if (!selectedDmId) return;
-    prevMessageCountRef.current = 0; // Reset when switching DMs
+    prevMessageCountRef.current = 0;
 
-    let pollCount = 0;
-
-    const load = async () => {
+    const loadMessages = async () => {
       try {
-        const res = await axios.get(`/api/dm/thread?dm_id=${selectedDmId}`, {
-          withCredentials: true,
-        });
-        console.log("Thread response:", res.data);
+        const res = await axios.get(`/api/dm/thread?dm_id=${selectedDmId}`, { withCredentials: true });
         
-        let msgs = [];
-        if (Array.isArray(res.data)) {
-          msgs = res.data;
-        } else if (res.data && Array.isArray(res.data.messages)) {
-          msgs = res.data.messages;
-        }
+        let msgs = res.data?.messages || (Array.isArray(res.data) ? res.data : []);
         
-        // Check for new messages from other users
+        // Play sound for new messages from others
         if (msgs.length > prevMessageCountRef.current && prevMessageCountRef.current > 0) {
           const lastMsg = msgs[msgs.length - 1];
-          if (lastMsg && lastMsg.sender_username !== currentUser) {
+          if (lastMsg?.sender_username !== currentUser) {
             playDoorbellDingDong();
           }
         }
         prevMessageCountRef.current = msgs.length;
-        
         setMessages(msgs);
-        
-        // Mark DM as read
-        axios.post(`/api/dm/${selectedDmId}/mark-read`, {}, { withCredentials: true }).catch(() => {});
       } catch (err) {
         console.error("Load messages error:", err);
       }
     };
 
-    load();
-    
-    const interval = setInterval(async () => {
-      pollCount++;
-      
-      // Verify session every 3 polls (15 seconds)
-      if (pollCount >= 3) {
-        pollCount = 0;
-        const sessionValid = await verifySession();
-        if (!sessionValid) {
-          clearInterval(interval);
-          return;
-        }
-      }
-      
-      load();
-    }, 5000);
-    
+    loadMessages();
+    const interval = setInterval(loadMessages, 5000);
     return () => clearInterval(interval);
-  }, [selectedDmId, verifySession]);
+  }, [selectedDmId, currentUser]);
 
-  // Auto-scroll
+  // Auto-scroll to bottom
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
-    }
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Poll for DM list updates (new conversations started by others)
+  // Poll for DM list updates
   useEffect(() => {
-    const pollDmList = async () => {
+    const interval = setInterval(async () => {
       try {
         const res = await axios.get("/api/dm/list", { withCredentials: true });
-        
-        let list = [];
-        if (Array.isArray(res.data)) {
-          list = res.data;
-        } else if (res.data && Array.isArray(res.data.dms)) {
-          list = res.data.dms;
-        } else if (res.data && typeof res.data === 'object') {
-          const keys = Object.keys(res.data);
-          for (const key of keys) {
-            if (Array.isArray(res.data[key])) {
-              list = res.data[key];
-              break;
-            }
-          }
-        }
-        
-        // Only update if the list changed (to avoid unnecessary re-renders)
-        setDmList(prevList => {
-          if (JSON.stringify(prevList) !== JSON.stringify(list)) {
-            return list;
-          }
-          return prevList;
-        });
-      } catch (err) {
-        // Silently fail - don't spam console
-      }
-    };
-    
-    const interval = setInterval(pollDmList, 5000); // Poll every 5 seconds
+        let list = res.data?.dms || (Array.isArray(res.data) ? res.data : []);
+        setDmList(prev => JSON.stringify(prev) !== JSON.stringify(list) ? list : prev);
+      } catch (err) {}
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
   // Poll for online users
   useEffect(() => {
-    const fetchOnlineUsers = async () => {
+    const fetchOnline = async () => {
       try {
         const res = await axios.get("/api/users/online", { withCredentials: true });
-        if (res.data && Array.isArray(res.data.online)) {
-          setOnlineUsers(res.data.online);
-        }
-      } catch (err) {
-        // Silently fail
-      }
+        if (res.data?.online) setOnlineUsers(res.data.online);
+      } catch (err) {}
     };
-    
-    fetchOnlineUsers();
-    const interval = setInterval(fetchOnlineUsers, 10000); // Poll every 10 seconds
+    fetchOnline();
+    const interval = setInterval(fetchOnline, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -278,220 +176,189 @@ export default function DmPage() {
       setNewBody("");
       
       // Refresh messages
-      const res = await axios.get(`/api/dm/thread?dm_id=${selectedDmId}`, {
-        withCredentials: true,
-      });
-      
-      let msgs = [];
-      if (Array.isArray(res.data)) {
-        msgs = res.data;
-      } else if (res.data && Array.isArray(res.data.messages)) {
-        msgs = res.data.messages;
-      }
-        // Check for new messages from other users
-        if (msgs.length > prevMessageCountRef.current && prevMessageCountRef.current > 0) {
-          const lastMsg = msgs[msgs.length - 1];
-          if (lastMsg && lastMsg.sender_username !== currentUser) {
-            playDoorbellDingDong();
-          }
-        }
-        prevMessageCountRef.current = msgs.length;
-        
-        setMessages(msgs);
-        
-        // Mark DM as read
-        axios.post(`/api/dm/${selectedDmId}/mark-read`, {}, { withCredentials: true }).catch(() => {});
+      const res = await axios.get(`/api/dm/thread?dm_id=${selectedDmId}`, { withCredentials: true });
+      let msgs = res.data?.messages || (Array.isArray(res.data) ? res.data : []);
+      prevMessageCountRef.current = msgs.length;
+      setMessages(msgs);
     } catch (err) {
       console.error("Send error:", err);
       alert("Failed to send message");
     } finally {
       setSending(false);
-      // Keep focus on input for next message
-      setTimeout(() => {
-        if (messageInputRef.current) {
-          messageInputRef.current.focus();
-        }
-      }, 50);
+      setTimeout(() => messageInputRef.current?.focus(), 50);
     }
   };
 
   const selectDm = (dm) => {
-    // Skip if already viewing this DM
     if (dm.dm_id === selectedDmId) return;
     setSelectedDmId(dm.dm_id);
     setOtherUsername(dm.other_username || "Unknown");
     setMessages([]);
-    navigate(`/dm/${dm.dm_id}`);
+    prevMessageCountRef.current = 0;
+    navigate(`/dm/${dm.dm_id}`, { replace: true });
   };
 
-  // Check if a user is online
-  const isUserOnline = (username) => {
-    return onlineUsers.includes(username);
+  const formatTime = (timestamp) => {
+    const date = new Date(timestamp);
+    let hours = date.getHours();
+    const minutes = date.getMinutes();
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12 || 12;
+    return `${hours}:${minutes.toString().padStart(2, '0')} ${ampm}`;
   };
 
   if (loading) {
     return (
-      <div style={{
-        minHeight: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: '#020617',
-        color: '#e5e7eb',
-        fontSize: '16px'
-      }}>
-        Loading DM...
+      <div className="bcord-chat-page">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#9ca3af' }}>
+          Loading...
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="dm-page-root">
-      {/* Session Warning Modal */}
+    <div className="bcord-chat-page">
+      {/* Session Warning */}
       {sessionWarning && (
         <div className="session-warning-overlay">
           <div className="session-warning-modal">
             <div className="warning-icon">⚠️</div>
             <h2>Session Changed</h2>
-            <p>
-              Another account has logged in on this browser. 
-              You are being redirected to the login page for security.
-            </p>
-            <p className="warning-note">
-              Note: Only one account can be active per browser. 
-              Use a different browser or incognito window for multiple accounts.
-            </p>
+            <p>Another account has logged in. Redirecting...</p>
           </div>
         </div>
       )}
 
-      <div className="dm-page-nav">
-        <button onClick={() => navigate("/chat")} className="dm-back-btn">
-          ← Back to Chat
-        </button>
-        <span style={{ color: '#9ca3af', fontSize: '12px', marginLeft: '12px' }}>
-          Logged in as: {currentUser}
-        </span>
+      {/* Top Bar */}
+      <div className="bcord-chat-topbar">
+        <div className="bcord-chat-topbar-left">
+          <span className="bcord-chat-topbar-title">Direct Messages</span>
+          <span className="bcord-chat-topbar-channel">
+            {otherUsername ? `@${otherUsername}` : 'Select a conversation'}
+          </span>
+        </div>
+        <div className="bcord-chat-topbar-right">
+          <button 
+            className="bcord-chat-topbar-btn"
+            onClick={() => navigate("/chat")}
+            title="Back to Chat"
+          >
+            ← Back
+          </button>
+        </div>
       </div>
 
-      <div className="dm-page-content">
-        <aside className="dm-page-sidebar">
+      {/* Main Content - Same structure as ChatPage */}
+      <div className="bcord-chat-body" style={{ gridTemplateColumns: '210px 1fr' }}>
+        {/* Left Sidebar - DM List */}
+        <div className="bcord-chat-col bcord-chat-left">
           <div className="bcord-chat-rooms-header">
-            <div className="bcord-chat-rooms-title">Direct Messages</div>
+            <div className="bcord-chat-rooms-title">CONVERSATIONS</div>
           </div>
-          <div className="dm-list-items">
+          <div className="bcord-chat-rooms-list">
             {dmList.length === 0 ? (
-              <div className="dm-list-empty">No DMs yet</div>
+              <div style={{ padding: '16px', color: '#6b7280', fontSize: '13px', textAlign: 'center' }}>
+                No conversations yet
+              </div>
             ) : (
               dmList.map((dm) => (
                 <button
                   key={dm.dm_id}
-                  className={`dm-list-item ${selectedDmId === dm.dm_id ? "active" : ""}`}
+                  className={`bcord-chat-room-item ${selectedDmId === dm.dm_id ? 'active' : ''}`}
                   onClick={() => selectDm(dm)}
                 >
-                  <div className="avatar-container">
-                    <div className="avatar">
-                      {(dm.other_username || "?").slice(0, 2).toUpperCase()}
-                    </div>
-                    {isUserOnline(dm.other_username) && (
-                      <div className="online-indicator" />
+                  <span className="bcord-chat-room-hash">@</span>
+                  <span className="bcord-chat-room-name">
+                    {dm.other_username || "Unknown"}
+                    {onlineUsers.includes(dm.other_username) && (
+                      <span className="online-dot" style={{ 
+                        display: 'inline-block', 
+                        width: '8px', 
+                        height: '8px', 
+                        background: '#22c55e', 
+                        borderRadius: '50%', 
+                        marginLeft: '6px' 
+                      }} />
                     )}
-                  </div>
-                  <div className="content">
-                    <div className="name">{dm.other_username || "Unknown"}</div>
-                    <div className="preview">{dm.last_message || "No messages yet"}</div>
-                  </div>
+                  </span>
                 </button>
               ))
             )}
           </div>
-        </aside>
+        </div>
 
-        <main className="dm-page-main">
-          {!selectedDmId ? (
-            <div className="dm-page-empty">
-              Select a conversation from the list
-            </div>
-          ) : (
-            <div className="dm-thread-root">
-              <header className="dm-thread-header">
-                <div className="dm-thread-title">
-                  <span className="dm-thread-hash">@</span>
-                  <span>{otherUsername}</span>
-                  {isUserOnline(otherUsername) && (
-                    <span className="online-badge">● Online</span>
-                  )}
-                </div>
-              </header>
+        {/* Center - Messages */}
+        <div className="bcord-chat-col bcord-chat-center">
+          {/* Channel Header */}
+          <div className="bcord-chat-channel-header">
+            <span className="bcord-chat-channel-hash">@</span>
+            <span className="bcord-chat-channel-name">
+              {otherUsername || 'Select a conversation'}
+              {otherUsername && onlineUsers.includes(otherUsername) && (
+                <span style={{ color: '#22c55e', fontSize: '12px', marginLeft: '8px' }}>● Online</span>
+              )}
+            </span>
+          </div>
 
-              <div className="dm-thread-body">
-                {messages.length === 0 ? (
-                  <div className="dm-thread-status">
-                    No messages yet. Say hi to {otherUsername}!
+          {/* Messages Area */}
+          <div className="bcord-chat-messages">
+            {!selectedDmId ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#6b7280' }}>
+                Select a conversation to start messaging
+              </div>
+            ) : messages.length === 0 ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#6b7280' }}>
+                No messages yet. Say hi to {otherUsername}!
+              </div>
+            ) : (
+              messages.map((m, idx) => (
+                <div key={m.dm_message_id || idx} className="bcord-chat-message">
+                  <div className="bcord-chat-message-avatar">
+                    {(m.sender_username || "?").slice(0, 2).toUpperCase()}
                   </div>
-                ) : (
-                  messages.map((m, idx) => (
-                    <div key={m.dm_message_id || idx} className="dm-thread-message">
-                      <div className="avatar">
-                        {(m.sender_username || "?").slice(0, 2).toUpperCase()}
-                      </div>
-                      <div className="content">
-                        <div className="meta">
-                          <span className="sender">{m.sender_username || "Unknown"}</span>
-                          <span className="time">{new Date(m.created_at).toLocaleString()}</span>
-                        </div>
-                        <div className="text">{m.content}</div>
-                      </div>
+                  <div className="bcord-chat-message-content">
+                    <div className="bcord-chat-message-header">
+                      <span className="bcord-chat-message-sender">{m.sender_username}</span>
+                      <span className="bcord-chat-message-time">{formatTime(m.created_at)}</span>
                     </div>
-                  ))
-                )}
-                <div ref={messagesEndRef} />
-              </div>
+                    <div className="bcord-chat-message-body">{m.content}</div>
+                  </div>
+                </div>
+              ))
+            )}
+            <div ref={messagesEndRef} />
+          </div>
 
-              <div className="dm-thread-composer">
-                <textarea
-                  ref={messageInputRef}
-                  value={newBody}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    if (value.length <= 500) {
-                      setNewBody(value);
-                      // Auto-resize
-                      e.target.style.height = 'auto';
-                      e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      sendMessage();
-                      // Reset height after sending
-                      e.target.style.height = 'auto';
-                    }
-                  }}
-                  placeholder={`Message @${otherUsername}`}
-                  rows={1}
-                  disabled={sending}
-                  maxLength={500}
-                />
-                {newBody.length > 400 && (
-                  <span style={{
-                    position: 'absolute',
-                    right: '80px',
-                    bottom: '18px',
-                    fontSize: '11px',
-                    color: newBody.length >= 500 ? '#ef4444' : '#9ca3af'
-                  }}>
-                    {newBody.length}/500
-                  </span>
-                )}
-                <button disabled={sending || !newBody.trim()} onClick={sendMessage}>
-                  {sending ? "Sending…" : "Send"}
-                </button>
-              </div>
+          {/* Input Area */}
+          {selectedDmId && (
+            <div className="bcord-chat-input-area">
+              <input
+                ref={messageInputRef}
+                type="text"
+                className="bcord-chat-input"
+                value={newBody}
+                onChange={(e) => setNewBody(e.target.value.slice(0, 500))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                  }
+                }}
+                placeholder={`Message @${otherUsername}`}
+                disabled={sending}
+                maxLength={500}
+              />
+              <button 
+                className="bcord-chat-send-btn" 
+                onClick={sendMessage}
+                disabled={sending || !newBody.trim()}
+              >
+                {sending ? "..." : "Send"}
+              </button>
             </div>
           )}
-        </main>
+        </div>
       </div>
     </div>
   );
