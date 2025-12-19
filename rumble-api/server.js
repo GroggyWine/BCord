@@ -82,7 +82,7 @@ async function checkLivestream(streamInfo) {
     
     const isLive = html.includes('LIVE') || html.includes('"isLiveBroadcast":true');
     
-    const thumbMatch = html.match(/property="og:image"\s+content="([^"]+)"/);
+    const thumbMatch = html.match(/property=og:image\s+content=([^\s><]+)/);
     let thumbnail = null;
     if (thumbMatch) {
       thumbnail = '/api/rumble/image?url=' + encodeURIComponent(thumbMatch[1]);
