@@ -114,7 +114,7 @@ https://bekord.com, https://www.bekord.com {
         rate_limit {
             zone api_zone {
                 key {remote_host}
-                events 100
+                events 200
                 window 1m
             }
         }

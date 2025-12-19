@@ -595,6 +595,9 @@ export default function ChatPage() {
   useEffect(() => {
     if (!selectedServerId) return;
     
+    // Reset the message ID ref when switching channels to prevent false "new message" sounds
+    lastMessageIdRef.current = null;
+    
     // Initial load
     loadMessages(selectedChannel, selectedServerId);
     
@@ -615,7 +618,7 @@ export default function ChatPage() {
       }
       
       loadMessages(selectedChannel, selectedServerId);
-    }, 3000);
+    }, 5000);
     
     return () => clearInterval(id);
   }, [selectedChannel, selectedServerId, verifySession]);
@@ -666,7 +669,7 @@ export default function ChatPage() {
       }
     };
     
-    const interval = setInterval(pollInvitations, 5000); // 5 seconds
+    const interval = setInterval(pollInvitations, 30000); // 30 seconds
     return () => clearInterval(interval);
   }, []);
 
@@ -770,7 +773,7 @@ export default function ChatPage() {
       }
     };
     
-    const interval = setInterval(pollChannels, 5000); // 5 seconds
+    const interval = setInterval(pollChannels, 30000); // 30 seconds
     return () => clearInterval(interval);
   }, [selectedServerId]);
 
@@ -844,17 +847,19 @@ export default function ChatPage() {
     };
     
     pollDms(); // Initial poll
-    const interval = setInterval(pollDms, 5000);
+    const interval = setInterval(pollDms, 30000); // 30 seconds
     return () => clearInterval(interval);
   }, [currentUser]);
   // Poll for unread messages in servers and channels
+  // NOTE: Do NOT include selectedServerId/selectedChannel in dependencies
+  // or it will spam API calls every time user clicks a server/channel
   useEffect(() => {
     if (!currentUser || servers.length === 0) return;
     
     fetchUnreadStatus(); // Initial fetch
-    const interval = setInterval(fetchUnreadStatus, 15000); // 15 seconds
+    const interval = setInterval(fetchUnreadStatus, 60000); // 60 seconds
     return () => clearInterval(interval);
-  }, [currentUser, servers.length, selectedServerId, selectedChannel]);
+  }, [currentUser, servers.length]);
 
   async function sendMessage() {
     if (!newBody.trim() || !selectedServerId) return;
