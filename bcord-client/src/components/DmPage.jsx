@@ -51,9 +51,13 @@ export default function DmPage() {
         const res = await axios.get("/api/profile", { withCredentials: true });
         if (res.data?.user) {
           setCurrentUser(res.data.user);
-          // Check if user is admin
-          if (res.data.is_admin) {
+          
+          // Check if user is admin by trying to access admin endpoint
+          try {
+            await axios.get("/api/admin/users", { withCredentials: true });
             setIsAdmin(true);
+          } catch {
+            setIsAdmin(false);
           }
         } else {
           navigate("/login");
