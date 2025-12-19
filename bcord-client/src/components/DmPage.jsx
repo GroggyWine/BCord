@@ -339,9 +339,9 @@ export default function DmPage() {
                 {/* DM Button - Active since we're on DM page */}
                 <div 
                   className="bcord-chat-rail-server active"
-                  onClick={() => setFriendsDrawerOpen(!friendsDrawerOpen)}
-                  style={{ cursor: 'pointer' }}
-                  title="Friends & DMs"
+                  onClick={() => {}}
+                  style={{ cursor: 'default' }}
+                  title="Direct Messages"
                 >
                   <div className="initials">DM</div>
                   {hasUnreadDms && <div className="dm-notification-dot"></div>}
@@ -552,36 +552,7 @@ export default function DmPage() {
         </div>
       </div>
 
-      {/* FRIENDS DRAWER */}
-      <div ref={friendsDrawerRef} className={`bcord-chat-friends-drawer ${friendsDrawerOpen ? 'open' : ''}`}>
-        <div className="drawer-inner">
-          <div className="drawer-header">
-            <div className="title">Friends & DMs</div>
-            <button className="close-btn" onClick={() => setFriendsDrawerOpen(false)}>×</button>
-          </div>
-          <div className="drawer-list">
-            {friends.length === 0 ? (
-              <div style={{ padding: '10px', fontSize: '12px', color: '#9ca3af', textAlign: 'center' }}>
-                Loading friends...
-              </div>
-            ) : (
-              friends.map((username) => (
-                <button
-                  key={username}
-                  className="drawer-item"
-                  onClick={() => handleSelectFriend(username)}
-                >
-                  <div className="avatar-wrapper">
-                    <div className="avatar">{username.slice(0, 2).toUpperCase()}</div>
-                    {onlineUsers.includes(username) && <div className="online-indicator"></div>}
-                  </div>
-                  <div className="name">{username}</div>
-                </button>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
+      
     </div>
   );
 }
