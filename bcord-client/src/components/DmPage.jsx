@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 import useTokenRefresher from "../hooks/useTokenRefresher";
-import { playDoorbellDingDong, playMessageSent } from "../utils/sounds";
+import { playDoorbellDingDong, playMessageSent, playChannelClick } from "../utils/sounds";
 
 export default function DmPage() {
   const { dmId } = useParams();
@@ -267,6 +267,7 @@ export default function DmPage() {
 
   const selectDm = (dm) => {
     if (dm.dm_id === selectedDmId) return;
+    playChannelClick();
     setSelectedDmId(dm.dm_id);
     setOtherUsername(dm.other_username || "Unknown");
     setMessages([]);

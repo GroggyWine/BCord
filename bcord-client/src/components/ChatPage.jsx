@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import useTokenRefresher from "../hooks/useTokenRefresher";
 import AdminPanel from "./AdminPanel";
-import { playInviteChime, playNewMessage, playServerJoined, playMessageSent, playUserOnline, playDoorbellDingDong } from "../utils/sounds";
+import { playInviteChime, playNewMessage, playServerJoined, playMessageSent, playUserOnline, playDoorbellDingDong, playServerClick, playChannelClick } from "../utils/sounds";
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -986,6 +986,7 @@ export default function ChatPage() {
 
   // Server management
   function handleSelectServer(serverId) {
+    playServerClick();
     setSelectedServerId(serverId);
     const server = servers.find(s => s.id === serverId);
     // Switch to that server's first channel (always has #general)
@@ -1389,7 +1390,7 @@ export default function ChatPage() {
               <button
                 key={channel}
                 className={`bcord-chat-room-item ${selectedChannel === channel ? "active" : ""}`}
-                onClick={() => { setSelectedChannel(channel); markChannelAsRead(channel, selectedServerId); }}
+                onClick={() => { playChannelClick(); setSelectedChannel(channel); markChannelAsRead(channel, selectedServerId); }}
               >
                 <div className="bcord-chat-room-content">
                   {unreadChannels[`${selectedServerId}-${channel}`] && <span className="channel-unread-dot" />}

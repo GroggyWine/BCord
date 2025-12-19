@@ -178,3 +178,22 @@ export default {
   playServerJoined,
   playLogout
 };
+
+// 11. SERVER CLICK - subtle click when selecting a server
+export function playServerClick() {
+  try {
+    playTone(500, 0.06, 'sine', 0.12, 0);
+    playTone(700, 0.08, 'sine', 0.1, 0.03);
+  } catch (e) {
+    console.warn('Sound error:', e);
+  }
+}
+
+// 12. CHANNEL CLICK - soft blip when selecting a channel
+export function playChannelClick() {
+  try {
+    playTone(800, 0.05, 'sine', 0.1, 0);
+  } catch (e) {
+    console.warn('Sound error:', e);
+  }
+}
