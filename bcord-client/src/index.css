@@ -1,8 +1,21 @@
+/* =============================================================================
+   BeKord - Main Stylesheet Entry Point
+   =============================================================================
+   UPDATED: 2025-12-19
+   NOTE: @import statements MUST come before @tailwind directives
+   ============================================================================= */
+
+/* Import custom stylesheets FIRST */
+@import './styles/bcord-global.css';
+@import './styles/bcord-auth.css';
+@import './App.css';
+
+/* Then Tailwind */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* Base body styling */
 body {
-  @apply bg-background text-gray-200 font-sans;
+  @apply bg-slate-950 text-gray-200 font-sans;
 }
-
