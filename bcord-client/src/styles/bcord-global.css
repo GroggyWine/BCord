@@ -35,6 +35,11 @@ body {
 }
 
 #root {
+  /* Override Vite defaults */
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  text-align: left !important;
   /* FIXED: 2025-12-19 - Changed from min-height to height, added overflow hidden */
   /* Reason: Prevents browser from adding scrollbar to the page itself */
   height: 100vh;
