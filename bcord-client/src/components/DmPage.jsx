@@ -208,6 +208,23 @@ export default function DmPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Send heartbeat to keep user marked as online
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    const sendHeartbeat = async () => {
+      try {
+        await axios.post("/api/users/heartbeat", {}, { withCredentials: true });
+      } catch (err) {
+        // Silently fail - not critical
+      }
+    };
+    
+    sendHeartbeat(); // Send immediately on mount
+    const interval = setInterval(sendHeartbeat, 30000); // Every 30 seconds
+    return () => clearInterval(interval);
+  }, [currentUser]);
+
   // Close friends drawer on outside click
   useEffect(() => {
     const handleClickOutside = (e) => {

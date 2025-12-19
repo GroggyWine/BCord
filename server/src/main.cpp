@@ -299,6 +299,79 @@ static std::string authenticate_request(const http::request<http::string_body> &
 // DM Helper Structures and Functions
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Online Status - Redis helpers
+// ---------------------------------------------------------------------------
+
+static sw::redis::Redis& get_redis() {
+    static sw::redis::Redis redis(REDIS_URI);
+    return redis;
+}
+
+// Set user as online with 45 second TTL
+static void set_user_online(const std::string& username) {
+    try {
+        auto& redis = get_redis();
+        std::string key = "online:" + username;
+        redis.set(key, "1", std::chrono::seconds(45));
+    } catch (const std::exception& e) {
+        log(std::string("Redis set_user_online error: ") + e.what());
+    }
+}
+
+// Check if a specific user is online
+static bool is_user_online(const std::string& username) {
+    try {
+        auto& redis = get_redis();
+        std::string key = "online:" + username;
+        auto val = redis.get(key);
+        return val.has_value();
+    } catch (const std::exception& e) {
+        log(std::string("Redis is_user_online error: ") + e.what());
+        return false;
+    }
+}
+
+// Get list of online users from a list of usernames
+static std::vector<std::string> get_online_users(const std::vector<std::string>& usernames) {
+    std::vector<std::string> online;
+    try {
+        auto& redis = get_redis();
+        for (const auto& username : usernames) {
+            std::string key = "online:" + username;
+            auto val = redis.get(key);
+            if (val.has_value()) {
+                online.push_back(username);
+            }
+        }
+    } catch (const std::exception& e) {
+        log(std::string("Redis get_online_users error: ") + e.what());
+    }
+    return online;
+}
+
+// Get accepted friends for a user
+static std::vector<std::string> get_accepted_friends(pqxx::connection& conn, int64_t user_id) {
+    std::vector<std::string> friends;
+    pqxx::read_transaction txn{conn};
+    
+    auto r = txn.exec_params(
+        "SELECT u.username FROM user_friends uf "
+        "JOIN users u ON (uf.friend_id = u.id OR uf.user_id = u.id) "
+        "WHERE (uf.user_id = $1 OR uf.friend_id = $1) "
+        "AND uf.status = 'accepted' "
+        "AND u.id != $1",
+        user_id
+    );
+    
+    for (const auto& row : r) {
+        friends.push_back(row["username"].as<std::string>());
+    }
+    return friends;
+}
+
+// ---------------------------------------------------------------------------
+
 struct UserInfo {
     int64_t id;
     bool is_admin;
@@ -2237,13 +2310,53 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         res.body() = out.dump();
     }
     
-    // GET /api/users/online - List online users (stub)
+    // POST /api/users/heartbeat - Keep user online
+    else if (path == "/api/users/heartbeat" && method == http::verb::post) {
+        try {
+            std::string username = authenticate_request(req);
+            set_user_online(username);
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::unauthorized);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/users/online - Get online friends for current user
     else if (path == "/api/users/online" && method == http::verb::get) {
-        nlohmann::json out;
-        out["online"] = nlohmann::json::array();
-        res.result(http::status::ok);
-        res.set(http::field::content_type, "application/json");
-        res.body() = out.dump();
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection conn(PG_CONN);
+            
+            // Get user ID
+            UserInfo user_info = load_user_info(conn, username);
+            
+            // Get accepted friends
+            std::vector<std::string> friends = get_accepted_friends(conn, user_info.id);
+            
+            // Check which friends are online
+            std::vector<std::string> online_friends = get_online_users(friends);
+            
+            nlohmann::json out;
+            out["online"] = online_friends;
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::unauthorized);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
     }
     
     // GET /api/servers/:id/unread - Get unread status for server (stub)

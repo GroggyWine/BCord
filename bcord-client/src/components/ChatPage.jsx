@@ -809,6 +809,23 @@ export default function ChatPage() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
+  // Send heartbeat to keep user marked as online
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    const sendHeartbeat = async () => {
+      try {
+        await axios.post("/api/users/heartbeat", {}, { withCredentials: true });
+      } catch (err) {
+        // Silently fail - not critical
+      }
+    };
+    
+    sendHeartbeat(); // Send immediately on mount
+    const interval = setInterval(sendHeartbeat, 30000); // Every 30 seconds
+    return () => clearInterval(interval);
+  }, [currentUser]);
+
   // Poll for DM updates to notify user of new DMs while in chat
   useEffect(() => {
     if (!currentUser) return;
