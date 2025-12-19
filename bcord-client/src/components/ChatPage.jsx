@@ -1314,7 +1314,7 @@ export default function ChatPage() {
             {/* DM = App Logo + Friends Button (DON'T TOUCH) */}
             <div 
               className="bcord-chat-rail-server"
-              onClick={() => navigate('/dm')}
+              onClick={() => { playServerClick(); navigate('/dm'); }}
               style={{ cursor: 'pointer' }}
               title="Direct Messages"
             >
