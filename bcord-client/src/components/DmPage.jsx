@@ -312,10 +312,8 @@ export default function DmPage() {
       {/* TOP BAR */}
       <div className="bcord-chat-topbar">
         <div className="bcord-chat-topbar-left">
-          <span className="bcord-chat-topbar-title">Direct Messages</span>
-          <span className="bcord-chat-topbar-channel">
-            {otherUsername ? `@${otherUsername}` : ''}
-          </span>
+          <span className="bcord-chat-topbar-title">My DMs</span>
+          
         </div>
         <div className="bcord-chat-topbar-right">
           <div className="bcord-chat-topbar-bell">🔔</div>
