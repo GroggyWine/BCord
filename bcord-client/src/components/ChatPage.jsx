@@ -41,15 +41,6 @@ export default function ChatPage() {
   const [currentServerMembers, setCurrentServerMembers] = useState([]);
   const [rumbleCollapsed, setRumbleCollapsed] = useState(false);
   const [rumbleVideos, setRumbleVideos] = useState([]);
-  const [rumbleManagerOpen, setRumbleManagerOpen] = useState(false);
-  const [rumbleChannels, setRumbleChannels] = useState(() => {
-    const saved = localStorage.getItem('rumbleChannels');
-    return saved ? JSON.parse(saved) : [
-      { id: 'Infowars', name: 'InfoWars', type: 'livestream', url: 'https://rumble.com/v6xkx0a-infowars-network-feed-live-247.html' },
-      { id: 'SaltyCracker', name: 'SaltyCracker', type: 'channel' },
-      { id: 'StevenCrowder', name: 'Steven Crowder', type: 'channel' }
-    ];
-  });
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [hasUnreadDms, setHasUnreadDms] = useState(false);
   const [unreadDmUsers, setUnreadDmUsers] = useState({}); // { username: true/false }
@@ -636,12 +627,11 @@ export default function ChatPage() {
   useEffect(() => {
     const fetchRumbleLineup = async () => {
       try {
-        // Use POST with custom channels from localStorage
-        const res = await axios.post('/api/rumble/lineup', { channels: rumbleChannels });
+        const res = await axios.get('/api/rumble/lineup');
         if (res.data && res.data.lineup) {
           const videos = res.data.lineup.map(item => ({
             title: item.title,
-            channel: item.channelId || item.name || item.channel,
+            channel: item.channelId || item.name,
             video_url: item.url,
             thumbnail: item.thumbnail,
             isLive: item.isLive || false,
@@ -657,24 +647,7 @@ export default function ChatPage() {
     fetchRumbleLineup();
     const interval = setInterval(fetchRumbleLineup, 5 * 60 * 1000); // 5 minutes
     return () => clearInterval(interval);
-  }, [rumbleChannels]);
-  
-  // Keyboard shortcut: Ctrl+Shift+K opens Rumble manager
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.ctrlKey && e.shiftKey && e.key === 'K') {
-        e.preventDefault();
-        setRumbleManagerOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
-  
-  // Save rumbleChannels to localStorage when changed
-  useEffect(() => {
-    localStorage.setItem('rumbleChannels', JSON.stringify(rumbleChannels));
-  }, [rumbleChannels]);
 
   // Poll invitations every 5 seconds for real-time bell notifications
   useEffect(() => {
@@ -2146,225 +2119,6 @@ export default function ChatPage() {
               <span className="icon">🚪</span>
               <span className="label">Log Out</span>
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* Rumble Lineup Manager Modal (Ctrl+Shift+K) */}
-      {rumbleManagerOpen && (
-        <div className="profile-menu-overlay" onClick={() => setRumbleManagerOpen(false)}>
-          <div 
-            className="rumble-manager-modal" 
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              background: '#1e293b',
-              borderRadius: '12px',
-              padding: '24px',
-              width: '480px',
-              maxHeight: '80vh',
-              overflow: 'auto',
-              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h2 style={{ margin: 0, color: '#f1f5f9', fontSize: '18px' }}>📺 Rumble Lineup Manager</h2>
-              <button 
-                onClick={() => setRumbleManagerOpen(false)}
-                style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '24px', cursor: 'pointer' }}
-              >×</button>
-            </div>
-            
-            <p style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '16px' }}>
-              Add up to 10 Rumble channels. Paste a Rumble URL to auto-detect!
-            </p>
-            
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '20px' }}>
-              {rumbleChannels.map((channel, index) => (
-                <div key={index} style={{ 
-                  background: '#0f172a',
-                  padding: '12px',
-                  borderRadius: '8px'
-                }}>
-                  {/* Row 1: Number, Type, Name, Delete */}
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: channel.type === 'livestream' ? '8px' : '0' }}>
-                    <span style={{ color: '#64748b', fontSize: '12px', width: '20px', flexShrink: 0 }}>{index + 1}.</span>
-                    <select
-                      value={channel.type}
-                      onChange={(e) => {
-                        const updated = [...rumbleChannels];
-                        updated[index] = { ...channel, type: e.target.value };
-                        if (e.target.value === 'channel') {
-                          delete updated[index].url;
-                        }
-                        setRumbleChannels(updated);
-                      }}
-                      style={{
-                        background: '#334155',
-                        border: 'none',
-                        borderRadius: '4px',
-                        color: '#e2e8f0',
-                        padding: '6px 8px',
-                        fontSize: '12px',
-                        width: '95px',
-                        flexShrink: 0
-                      }}
-                    >
-                      <option value="channel">Channel</option>
-                      <option value="livestream">Livestream</option>
-                    </select>
-                    <input
-                      type="text"
-                      value={channel.id}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        const updated = [...rumbleChannels];
-                        if (val.includes('rumble.com/c/')) {
-                          const match = val.match(/rumble\.com\/c\/([^\/?]+)/);
-                          if (match) {
-                            updated[index] = { ...channel, id: match[1], name: match[1], type: 'channel' };
-                            setRumbleChannels(updated);
-                            return;
-                          }
-                        } else if (val.includes('rumble.com/v')) {
-                          const videoId = val.split('/').pop()?.split('-')[0] || 'video';
-                          updated[index] = { ...channel, id: videoId, name: channel.name || 'Livestream', type: 'livestream', url: val };
-                          setRumbleChannels(updated);
-                          return;
-                        }
-                        updated[index] = { ...channel, id: val };
-                        setRumbleChannels(updated);
-                      }}
-                      placeholder="Channel ID or paste URL"
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        background: '#334155',
-                        border: 'none',
-                        borderRadius: '4px',
-                        color: '#e2e8f0',
-                        padding: '8px 10px',
-                        fontSize: '13px'
-                      }}
-                    />
-                    <input
-                      type="text"
-                      value={channel.name}
-                      onChange={(e) => {
-                        const updated = [...rumbleChannels];
-                        updated[index] = { ...channel, name: e.target.value };
-                        setRumbleChannels(updated);
-                      }}
-                      placeholder="Display Name"
-                      style={{
-                        width: '110px',
-                        flexShrink: 0,
-                        background: '#334155',
-                        border: 'none',
-                        borderRadius: '4px',
-                        color: '#e2e8f0',
-                        padding: '8px 10px',
-                        fontSize: '13px'
-                      }}
-                    />
-                    <button
-                      onClick={() => {
-                        const updated = rumbleChannels.filter((_, i) => i !== index);
-                        setRumbleChannels(updated);
-                      }}
-                      style={{
-                        background: '#ef4444',
-                        border: 'none',
-                        borderRadius: '4px',
-                        color: 'white',
-                        padding: '6px 10px',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        flexShrink: 0
-                      }}
-                    >🗑</button>
-                  </div>
-                  {/* Row 2: URL field for livestreams only */}
-                  {channel.type === 'livestream' && (
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginLeft: '28px' }}>
-                      <span style={{ color: '#64748b', fontSize: '11px', flexShrink: 0 }}>URL:</span>
-                      <input
-                        type="text"
-                        value={channel.url || ''}
-                        onChange={(e) => {
-                          const updated = [...rumbleChannels];
-                          updated[index] = { ...channel, url: e.target.value };
-                          setRumbleChannels(updated);
-                        }}
-                        placeholder="https://rumble.com/v..."
-                        style={{
-                          flex: 1,
-                          minWidth: 0,
-                          background: '#334155',
-                          border: 'none',
-                          borderRadius: '4px',
-                          color: '#e2e8f0',
-                          padding: '6px 10px',
-                          fontSize: '12px'
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            
-            {rumbleChannels.length < 10 && (
-              <button
-                onClick={() => {
-                  setRumbleChannels([...rumbleChannels, { id: '', name: '', type: 'channel' }]);
-                }}
-                style={{
-                  width: '100%',
-                  padding: '12px',
-                  background: '#334155',
-                  border: '2px dashed #475569',
-                  borderRadius: '8px',
-                  color: '#94a3b8',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  marginBottom: '16px'
-                }}
-              >+ Add Channel ({rumbleChannels.length}/10)</button>
-            )}
-            
-            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => {
-                  setRumbleChannels([
-                    { id: 'Infowars', name: 'InfoWars', type: 'livestream', url: 'https://rumble.com/v6xkx0a-infowars-network-feed-live-247.html' },
-                    { id: 'SaltyCracker', name: 'SaltyCracker', type: 'channel' },
-                    { id: 'StevenCrowder', name: 'Steven Crowder', type: 'channel' }
-                  ]);
-                }}
-                style={{
-                  padding: '10px 16px',
-                  background: '#475569',
-                  border: 'none',
-                  borderRadius: '6px',
-                  color: '#e2e8f0',
-                  cursor: 'pointer',
-                  fontSize: '13px'
-                }}
-              >Reset to Defaults</button>
-              <button
-                onClick={() => setRumbleManagerOpen(false)}
-                style={{
-                  padding: '10px 20px',
-                  background: '#6366f1',
-                  border: 'none',
-                  borderRadius: '6px',
-                  color: 'white',
-                  cursor: 'pointer',
-                  fontSize: '13px',
-                  fontWeight: '600'
-                }}
-              >Save & Close</button>
-            </div>
           </div>
         </div>
       )}
