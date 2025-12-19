@@ -17,6 +17,9 @@
 #
 # 2025-12-19: Added Rumble API proxy route
 #             - /api/rumble/* now routes to bcord-rumble-api:3099
+#
+# 2025-12-19: Fixed CAPTCHA routing (handle instead of handle_path)
+#             Fixed CSP to allow Google Fonts
 # =============================================================================
 
 {
@@ -55,7 +58,7 @@ https://bekord.com, https://www.bekord.com {
         Cross-Origin-Opener-Policy "same-origin"
         Cross-Origin-Resource-Policy "same-site"
         Cross-Origin-Embedder-Policy "require-corp"
-        Content-Security-Policy "default-src 'self'; img-src 'self' data: https://1a-1791.com; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss://bekord.com wss://www.bekord.com https://bekord.com https://www.bekord.com"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data: https://1a-1791.com blob:; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' wss://bekord.com wss://www.bekord.com https://bekord.com https://www.bekord.com"
         Access-Control-Allow-Origin https://{host}
         Access-Control-Allow-Credentials true
         Access-Control-Allow-Headers "Authorization, Content-Type"
@@ -93,12 +96,16 @@ https://bekord.com, https://www.bekord.com {
         reverse_proxy bcord-backend:9000
     }
 
-    # Rumble API - routes to separate rumble scraper container
-    # ADDED: 2025-12-19 - Rumble lineup was not loading because /api/rumble/* 
-    # was going to backend:9000 instead of rumble-api:3099
+    # CAPTCHA proxy - use 'handle' NOT 'handle_path' to preserve the path
+    @captcha path /captcha
+    handle @captcha {
+        reverse_proxy bcord-backend:9000
+    }
+
+    # Rumble API - routes to backend (backend handles the Rumble fetching)
     @rumble_api path /api/rumble/*
     handle @rumble_api {
-        reverse_proxy bcord-rumble-api:3099
+        reverse_proxy bcord-backend:9000
     }
 
     # Rate limiting: General API (100 req/min)
@@ -115,16 +122,11 @@ https://bekord.com, https://www.bekord.com {
     }
 
     # Prometheus metrics endpoint
-    handle_path /metrics {
+    handle /metrics {
         header {
             Content-Type "text/plain; version=0.0.4"
             Cache-Control "no-store"
         }
-        reverse_proxy bcord-backend:9000
-    }
-
-    # CAPTCHA proxy
-    handle_path /captcha* {
         reverse_proxy bcord-backend:9000
     }
 
