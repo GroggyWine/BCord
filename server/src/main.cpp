@@ -67,126 +67,6 @@ static std::string get_redis_uri() {
 const std::string PG_CONN = get_pg_conn();
 static const std::string REDIS_URI = get_redis_uri();
 
-// ---------------------------------------------------------------------------
-// ADDED 2025-12-19: Database Connection Pool
-// REASON: Creating new connections per request caused bottleneck (163 req/s vs 4000)
-// SOLUTION: Pool of reusable connections with RAII wrapper for automatic return
-// ---------------------------------------------------------------------------
-#include <queue>
-#include <condition_variable>
-
-class ConnectionPool {
-public:
-    ConnectionPool(const std::string& conn_str, size_t pool_size = 10)
-        : conn_str_(conn_str), max_size_(pool_size) {
-        for (size_t i = 0; i < pool_size; ++i) {
-            try {
-                pool_.push(std::make_unique<pqxx::connection>(conn_str_));
-            } catch (const std::exception& e) {
-                std::cerr << "Failed to create pool connection: " << e.what() << std::endl;
-            }
-        }
-        std::cout << "[POOL] Initialized with " << pool_.size() << " connections" << std::endl;
-    }
-
-    // Get a connection from the pool (blocks if none available)
-    std::unique_ptr<pqxx::connection> acquire() {
-        std::unique_lock<std::mutex> lock(mtx_);
-        
-        // Wait for available connection or create new one if under max
-        while (pool_.empty()) {
-            if (active_count_ < max_size_ * 2) {  // Allow temporary overflow
-                try {
-                    active_count_++;
-                    lock.unlock();
-                    return std::make_unique<pqxx::connection>(conn_str_);
-                } catch (...) {
-                    lock.lock();
-                    active_count_--;
-                    throw;
-                }
-            }
-            cv_.wait(lock);
-        }
-        
-        auto conn = std::move(pool_.front());
-        pool_.pop();
-        active_count_++;
-        
-        // Validate connection is still alive
-        try {
-            if (!conn->is_open()) {
-                conn = std::make_unique<pqxx::connection>(conn_str_);
-            }
-        } catch (...) {
-            conn = std::make_unique<pqxx::connection>(conn_str_);
-        }
-        
-        return conn;
-    }
-
-    // Return a connection to the pool
-    void release(std::unique_ptr<pqxx::connection> conn) {
-        std::lock_guard<std::mutex> lock(mtx_);
-        active_count_--;
-        if (conn && conn->is_open() && pool_.size() < max_size_) {
-            pool_.push(std::move(conn));
-        }
-        cv_.notify_one();
-    }
-
-    size_t available() const {
-        std::lock_guard<std::mutex> lock(mtx_);
-        return pool_.size();
-    }
-
-private:
-    std::string conn_str_;
-    size_t max_size_;
-    size_t active_count_ = 0;
-    std::queue<std::unique_ptr<pqxx::connection>> pool_;
-    mutable std::mutex mtx_;
-    std::condition_variable cv_;
-};
-
-// RAII wrapper for automatic connection return
-class PooledConnection {
-public:
-    PooledConnection(ConnectionPool& pool) : pool_(pool), conn_(pool.acquire()) {}
-    ~PooledConnection() { pool_.release(std::move(conn_)); }
-    
-    pqxx::connection& operator*() { return *conn_; }
-    pqxx::connection* operator->() { return conn_.get(); }
-    pqxx::connection& get() { return *conn_; }
-    // Implicit conversion for backward compatibility with existing code
-    operator pqxx::connection&() { return *conn_; }
-    
-    // Prevent copying
-    PooledConnection(const PooledConnection&) = delete;
-    PooledConnection& operator=(const PooledConnection&) = delete;
-    
-    // Allow moving
-    PooledConnection(PooledConnection&&) = default;
-    PooledConnection& operator=(PooledConnection&&) = default;
-
-private:
-    ConnectionPool& pool_;
-    std::unique_ptr<pqxx::connection> conn_;
-};
-
-// Global connection pool instance (initialized after PG_CONN is set)
-static std::unique_ptr<ConnectionPool> g_db_pool;
-
-static void init_connection_pool() {
-    g_db_pool = std::make_unique<ConnectionPool>(PG_CONN, 20);
-    // NOTE: Using std::cout directly since log() is defined later in file
-    std::cout << "[POOL] ✅ Connection pool initialized with 20 connections" << std::endl;
-}
-// ---------------------------------------------------------------------------
-// END Connection Pool
-// ---------------------------------------------------------------------------
-
-
 static void log(const std::string &msg) {
     std::lock_guard<std::mutex> lock(cout_mutex);
     std::cout << "[" << std::time(nullptr) << "] " << msg << std::endl;
@@ -194,7 +74,6 @@ static void log(const std::string &msg) {
 
 static void init_database() {
     try {
-        // NOTE: Using direct connection here because pool is not yet initialized
         pqxx::connection c(PG_CONN);
         pqxx::work txn(c);
         txn.commit();
@@ -778,9 +657,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                 std::string username = body["username"].get<std::string>();
                 std::string code     = body["code"].get<std::string>();
 
-                // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-                // OLD: pqxx::connection c(PG_CONN);
-                PooledConnection c(*g_db_pool);
+                pqxx::connection c(PG_CONN);
                 pqxx::work txn(c);
 
                 // First: does the user exist, and are they already verified?
@@ -980,9 +857,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                     R"({"status":"error","message":"channel and body are required"})";
             }
 
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-                // OLD: pqxx::connection c(PG_CONN);
-                PooledConnection c(*g_db_pool);
+            pqxx::connection c(PG_CONN);
             pqxx::work txn(c);
 
             // Verify user has access to this server
@@ -1099,9 +974,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                 }
             }
 
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-                // OLD: pqxx::connection c(PG_CONN);
-                PooledConnection c(*g_db_pool);
+            pqxx::connection c(PG_CONN);
             pqxx::work txn(c);
 
             // Verify user has access to this server
@@ -1170,9 +1043,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             }
             std::string other_username = j["other_username"].get<std::string>();
 
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             UserInfo me = load_user_info(db, current_username);
             UserInfo other = load_user_info(db, other_username);
 
@@ -1205,9 +1076,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             int64_t dm_id = j["dm_id"].get<int64_t>();
             std::string content = j["content"].get<std::string>();
 
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             UserInfo me = load_user_info(db, current_username);
 
             send_dm_message(db, me.id, dm_id, content);
@@ -1230,9 +1099,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         try {
             std::string current_username = authenticate_request(req);
 
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             UserInfo me = load_user_info(db, current_username);
 
             nlohmann::json arr = list_dms_for_user(db, me.id);
@@ -1276,9 +1143,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             }
             int64_t dm_id = std::stoll(dm_id_str);
 
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             UserInfo me = load_user_info(db, current_username);
 
             nlohmann::json messages = fetch_dm_thread_for_user(db, me.id, dm_id);
@@ -1323,9 +1188,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             }
             int64_t dm_id = std::stoll(dm_id_str);
 
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             UserInfo me = load_user_info(db, current_username);
             require_admin(me); // 🚨 admin-only
 
@@ -1480,9 +1343,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             // Hard-coded admin password
             const std::string ADMIN_PASSWORD = "1Qallergyccnajn01";
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::read_transaction txn(db);
             
             // Check if user is admin
@@ -1522,9 +1383,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         try {
             std::string current_username = authenticate_request(req);
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::read_transaction txn(db);
             
             // Check if user is admin
@@ -1577,9 +1436,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         try {
             std::string current_username = authenticate_request(req);
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             
             {
                 pqxx::read_transaction txn(db);
@@ -1638,9 +1495,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             std::string id_str = path.substr(17);
             int64_t user_id = std::stoll(id_str);
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             
             {
                 pqxx::read_transaction txn(db);
@@ -1719,9 +1574,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             std::string name = j["name"].get<std::string>();
             std::string initials = j["initials"].get<std::string>();
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::work txn(db);
             
             // Create server
@@ -1778,9 +1631,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         try {
             std::string current_username = authenticate_request(req);
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::read_transaction txn(db);
             
             // Get all servers where user is a member
@@ -1840,9 +1691,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             std::string server_id_str = path.substr(start, end - start);
             int64_t server_id = std::stoll(server_id_str);
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::read_transaction txn(db);
             
             // Verify user has access to this server
@@ -1894,9 +1743,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             std::string current_username = authenticate_request(req);
             (void)current_username; // Authentication check only
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::read_transaction txn(db);
             
             // Get all verified users
@@ -1950,9 +1797,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                 throw std::runtime_error("invalid password");
             }
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             
             // Check if current user is admin
             pqxx::read_transaction txn(db);
@@ -2037,9 +1882,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                 throw std::runtime_error("channel name must be 1-100 characters");
             }
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::work txn(db);
             
             // Verify user has owner/admin role on this server
@@ -2132,9 +1975,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                 throw std::runtime_error("cannot delete the general channel");
             }
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::work txn(db);
             
             // Verify user has owner/admin role on this server
@@ -2210,9 +2051,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             std::string server_id_str = path.substr(start);
             int64_t server_id = std::stoll(server_id_str);
             
-            // COMMENTED 2025-12-19: Direct connection replaced with pooled connection
-            // OLD: pqxx::connection db(PG_CONN);
-            PooledConnection db(*g_db_pool);
+            pqxx::connection db(PG_CONN);
             pqxx::work txn(db);
             
             // Verify user is the server owner
@@ -2282,6 +2121,111 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         }
     }
 
+    // =========================================================================
+    // STUB ENDPOINTS - Added 2025-12-19
+    // These return empty/success responses to prevent frontend 404 errors
+    // TODO: Implement full functionality later
+    // =========================================================================
+
+    // GET /api/invitations - List pending invitations (stub)
+    else if (path == "/api/invitations" && method == http::verb::get) {
+        nlohmann::json out;
+        out["invitations"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/invitations/:id/accept - Accept invitation (stub)
+    else if (path.rfind("/api/invitations/", 0) == 0 && 
+             path.find("/accept") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "invitation accepted";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/invitations/:id/decline - Decline invitation (stub)
+    else if (path.rfind("/api/invitations/", 0) == 0 && 
+             path.find("/decline") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "invitation declined";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // GET /api/users/online - List online users (stub)
+    else if (path == "/api/users/online" && method == http::verb::get) {
+        nlohmann::json out;
+        out["online"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // GET /api/servers/:id/unread - Get unread status for server (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/unread") != std::string::npos && 
+             method == http::verb::get) {
+        nlohmann::json out;
+        out["channels"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/servers/:id/invite - Invite user to server (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/invite") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "invitation sent";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/servers/:id/leave - Leave server (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/leave") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        out["message"] = "left server";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // GET /api/servers/:id/members - Get server members (stub)
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/members") != std::string::npos && 
+             method == http::verb::get) {
+        nlohmann::json out;
+        out["members"] = nlohmann::json::array();
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+    
+    // POST /api/channels/:id/mark-read - Mark channel as read (stub)
+    else if (path.rfind("/api/channels/", 0) == 0 && 
+             path.find("/mark-read") != std::string::npos && 
+             method == http::verb::post) {
+        nlohmann::json out;
+        out["status"] = "ok";
+        res.result(http::status::ok);
+        res.set(http::field::content_type, "application/json");
+        res.body() = out.dump();
+    }
+
     else {
         res.result(http::status::not_found);
         res.set(http::field::content_type, "application/json");
@@ -2313,8 +2257,6 @@ static void do_session(tcp::socket socket) {
 int main() {
     log("🚀 BCord backend starting...");
     init_database();
-    // ADDED 2025-12-19: Initialize connection pool after database check
-    init_connection_pool();
 
     if (!initialize_schema()) {
         log("❌ Failed to initialize schema");

@@ -29,10 +29,16 @@ body {
   color: var(--bcord-text);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
   -webkit-font-smoothing: antialiased;
+  /* FIXED: 2025-12-19 - Prevent page-level scrollbar */
+  /* Reason: Page shell should stay fixed, only internal elements (messages, channels, etc.) should scroll */
+  overflow: hidden;
 }
 
 #root {
-  min-height: 100vh;
+  /* FIXED: 2025-12-19 - Changed from min-height to height, added overflow hidden */
+  /* Reason: Prevents browser from adding scrollbar to the page itself */
+  height: 100vh;
+  overflow: hidden;
   background: var(--bcord-bg);
   color: var(--bcord-text);
 }
@@ -71,9 +77,12 @@ button {
   background: #334155;
 }
 
-/* For pages that aren’t auth (chat, security, etc.) */
+/* For pages that aren't auth (chat, security, etc.) */
 .bcord-app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  /* FIXED: 2025-12-19 - Changed from min-height to height */
+  /* Reason: Prevents page from growing beyond viewport */
+  overflow: hidden;
   background: radial-gradient(circle at top, #020617 0, #020617 55%);
   color: var(--bcord-text);
   display: flex;
@@ -85,6 +94,9 @@ button {
   flex: 1;
   display: flex;
   flex-direction: column;
+  /* FIXED: 2025-12-19 - Added overflow hidden */
+  /* Reason: Contain scrolling within child elements */
+  overflow: hidden;
 }
 
 /* A simple surface/card style you can reuse outside auth pages */
@@ -116,6 +128,12 @@ button {
 /* ===================================================================== */
 
 .bcord-chat-root {
+  /* FIXED: 2025-12-19 - Ensure layout starts at top of viewport */
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   height: 100vh;
   max-height: 100vh;
   display: flex;
@@ -123,7 +141,6 @@ button {
   background: radial-gradient(circle at top, #020617 0, #020617 55%);
   overflow: hidden;
   color: var(--bcord-text);
-  overflow: hidden;
 }
 
 /* Top bar (very top strip) */
@@ -136,6 +153,7 @@ button {
   border-bottom: 1px solid rgba(15, 23, 42, 0.9);
   background: rgba(15, 23, 42, 0.98);
   box-shadow: 0 1px 0 rgba(15, 23, 42, 1);
+  flex-shrink: 0;
 }
 
 .bcord-chat-topbar-left {
@@ -194,7 +212,6 @@ button {
   border-right: 1px solid rgba(15, 23, 42, 0.95);
   min-height: 0;
   max-height: 100%;
-  overflow: hidden;
   overflow: hidden;
 }
 
@@ -593,6 +610,8 @@ button {
   padding: 10px 14px 0;
   overflow-y: auto;
   overflow-x: hidden;
+  /* FIXED: 2025-12-19 - Ensure messages container is left-aligned */
+  text-align: left;
 }
 
 .bcord-chat-empty {
@@ -624,6 +643,8 @@ button {
 .bcord-chat-message-body {
   flex: 1;
   min-width: 0;
+  /* FIXED: 2025-12-19 - Ensure message body is left-aligned */
+  text-align: left;
 }
 
 .bcord-chat-message-meta {
@@ -716,6 +737,7 @@ button {
   font-weight: 600;
   text-transform: uppercase;
   color: var(--bcord-muted);
+  flex-shrink: 0;
 }
 
 .bcord-chat-rumble-list {
@@ -932,6 +954,7 @@ button {
   padding: 0 14px;
   border-bottom: 1px solid rgba(15, 23, 42, 1);
   background: #020617;
+  flex-shrink: 0;
 }
 
 .dm-back-btn {
@@ -1813,11 +1836,6 @@ button {
   animation: fadeIn 0.3s ease;
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
 .session-warning-modal {
   background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
   border: 2px solid #ef4444;
@@ -1827,17 +1845,6 @@ button {
   text-align: center;
   box-shadow: 0 25px 50px -12px rgba(239, 68, 68, 0.4);
   animation: slideUp 0.3s ease;
-}
-
-@keyframes slideUp {
-  from { 
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to { 
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 .session-warning-modal .warning-icon {
@@ -1967,6 +1974,8 @@ button {
   line-height: 1.4;
   word-wrap: break-word;
   overflow-wrap: anywhere;
+  /* FIXED: 2025-12-19 - Ensure message text is left-aligned */
+  text-align: left;
 }
 
 /* ==================== INVITATION SYSTEM ==================== */

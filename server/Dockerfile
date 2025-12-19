@@ -54,11 +54,12 @@ RUN cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release && \
 # ------------------------
 FROM ubuntu:24.04 AS runtime
 
-# Install runtime libraries + permanent debug tools
+# Install runtime libraries + permanent debug tools + CA certificates for HTTPS
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev libpqxx-dev libboost-system-dev libhiredis-dev \
     libcurl4 libargon2-1 \
     curl wget iputils-ping \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -72,4 +73,3 @@ CMD ["bcord"]
 # 🩺 Final Healthcheck — simple and reliable
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=8 \
   CMD wget -qO- http://localhost:9000/api/health | grep -q "healthy" || exit 1
-

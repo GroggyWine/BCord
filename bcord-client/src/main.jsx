@@ -46,12 +46,19 @@ function ProtectedRoute({ children }) {
 
 // -----------------------------------------------------------------------------
 // Public Route Wrapper  
-// Redirects to /chat if already authenticated
+// COMMENTED OUT REDIRECT: 2025-12-19
+// Reason: The redirect was causing users with expired/invalid tokens to be 
+// stuck in a redirect loop. They couldn't access /login because PublicRoute
+// saw a token existed (even though it was invalid), and ChatPage would fail
+// auth and redirect back to /login. Now users can always access /login.
+// The ChatPage handles proper token validation - if valid, user stays; 
+// if invalid, ChatPage redirects to /login anyway.
 // -----------------------------------------------------------------------------
 function PublicRoute({ children }) {
-  if (isAuthenticated()) {
-    return <Navigate to="/chat" replace />;
-  }
+  // COMMENTED OUT: Was causing redirect loop with stale/invalid tokens
+  // if (isAuthenticated()) {
+  //   return <Navigate to="/chat" replace />;
+  // }
   return children;
 }
 

@@ -14,6 +14,9 @@
 # 2025-12-19: Added rate limiting for security
 #             - auth_zone: 10 req/min for /api/auth/* endpoints
 #             - api_zone: 100 req/min for general API
+#
+# 2025-12-19: Added Rumble API proxy route
+#             - /api/rumble/* now routes to bcord-rumble-api:3099
 # =============================================================================
 
 {
@@ -52,7 +55,7 @@ https://bekord.com, https://www.bekord.com {
         Cross-Origin-Opener-Policy "same-origin"
         Cross-Origin-Resource-Policy "same-site"
         Cross-Origin-Embedder-Policy "require-corp"
-        Content-Security-Policy "default-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss://bekord.com wss://www.bekord.com https://bekord.com https://www.bekord.com"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data: https://1a-1791.com; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss://bekord.com wss://www.bekord.com https://bekord.com https://www.bekord.com"
         Access-Control-Allow-Origin https://{host}
         Access-Control-Allow-Credentials true
         Access-Control-Allow-Headers "Authorization, Content-Type"
@@ -88,6 +91,14 @@ https://bekord.com, https://www.bekord.com {
             }
         }
         reverse_proxy bcord-backend:9000
+    }
+
+    # Rumble API - routes to separate rumble scraper container
+    # ADDED: 2025-12-19 - Rumble lineup was not loading because /api/rumble/* 
+    # was going to backend:9000 instead of rumble-api:3099
+    @rumble_api path /api/rumble/*
+    handle @rumble_api {
+        reverse_proxy bcord-rumble-api:3099
     }
 
     # Rate limiting: General API (100 req/min)
