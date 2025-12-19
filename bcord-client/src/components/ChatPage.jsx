@@ -623,7 +623,7 @@ export default function ChatPage() {
     return () => clearInterval(id);
   }, [selectedChannel, selectedServerId, verifySession]);
 
-  // Fetch Rumble lineup on mount and every 5 seconds
+  // Fetch Rumble lineup on mount and every 5 minutes
   useEffect(() => {
     const fetchRumbleLineup = async () => {
       try {
@@ -646,7 +646,7 @@ export default function ChatPage() {
     };
     
     fetchRumbleLineup();
-    const interval = setInterval(fetchRumbleLineup, 5 * 1000); // 5 seconds
+    const interval = setInterval(fetchRumbleLineup, 5 * 60 * 1000); // 5 minutes
     return () => clearInterval(interval);
   }, []);
 
