@@ -1212,6 +1212,62 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
     // -----------------------------------------------------------------------
     // 🧩 CAPTCHA proxy (frontend preview support)
     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Rumble Lineup - Fetch multiple channels
+    // -----------------------------------------------------------------------
+    else if (path == "/api/rumble/lineup" && method == http::verb::get) {
+        try {
+            // Predefined list of channels to fetch
+            std::vector<std::string> channels = {
+                "Bongino",
+                "russellbrand", 
+                "Timcast",
+                "GLennBeckProgram",
+                "dineshdsouza",
+                "StevenCrowder",
+                "TuckerCarlson",
+                "TheDanBonginoShow"
+            };
+            
+            nlohmann::json lineup = nlohmann::json::array();
+            
+            for (const auto& channel : channels) {
+                try {
+                    RumbleCacheEntry entry = get_rumble_latest(channel);
+                    
+                    nlohmann::json item;
+                    item["name"] = entry.channel;
+                    item["channelId"] = entry.channel;
+                    item["title"] = entry.title;
+                    item["url"] = entry.video_url;
+                    item["thumbnail"] = entry.thumbnail_url;
+                    item["isLive"] = false;
+                    item["type"] = "video";
+                    
+                    lineup.push_back(item);
+                } catch (const std::exception& e) {
+                    log("Rumble lineup - failed to fetch " + channel + ": " + e.what());
+                }
+            }
+            
+            nlohmann::json out;
+            out["lineup"] = lineup;
+            out["count"] = lineup.size();
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            log("Rumble lineup error: " + std::string(e.what()));
+            res.result(http::status::internal_server_error);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+
     else if (path == "/api/rumble/latest" && method == http::verb::get) {
         try {
             // Parse channel from query string
