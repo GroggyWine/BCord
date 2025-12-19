@@ -18,7 +18,7 @@ export default function DmPage() {
   const [otherUsername, setOtherUsername] = useState("");
   const [messages, setMessages] = useState([]);
   const [newBody, setNewBody] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [currentUser, setCurrentUser] = useState("");
   const [onlineUsers, setOnlineUsers] = useState([]);
