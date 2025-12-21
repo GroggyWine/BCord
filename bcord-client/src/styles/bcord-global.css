@@ -2016,10 +2016,10 @@ button {
   position: absolute;
   top: 4px;
   right: 4px;
-  background: #dc2626;
-  color: #fff;
+  background: #fbbf24;
+  color: #000;
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
   min-width: 16px;
   height: 16px;
   border-radius: 8px;
@@ -2027,12 +2027,19 @@ button {
   align-items: center;
   justify-content: center;
   padding: 0 4px;
-  animation: pulse 2s ease-in-out infinite;
+  animation: yellowGlow 1.5s ease-in-out infinite;
+  box-shadow: 0 0 8px 2px rgba(251, 191, 36, 0.6);
 }
 
-@keyframes pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.1); }
+@keyframes yellowGlow {
+  0%, 100% { 
+    transform: scale(1);
+    box-shadow: 0 0 8px 2px rgba(251, 191, 36, 0.6);
+  }
+  50% { 
+    transform: scale(1.1);
+    box-shadow: 0 0 16px 4px rgba(251, 191, 36, 0.9);
+  }
 }
 
 /* Invitations Panel */
@@ -2329,10 +2336,21 @@ button {
   right: -2px;
   width: 10px;
   height: 10px;
-  background-color: #ef4444;
+  background-color: #a855f7;
   border-radius: 50%;
   border: 2px solid #0f172a;
   animation: pulse-dot 2s infinite;
+}
+
+/* DM user unread dot - purple dot before username in DM list */
+.dm-user-unread-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background-color: #a855f7;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex-shrink: 0;
 }
 
 @keyframes pulse-dot {
@@ -2394,4 +2412,338 @@ button {
   border-radius: 50%;
   margin-left: 8px;
   animation: pulse-dot 2s infinite;
+}
+
+/* =============================================================================
+   FRIENDS MODAL - Added 2025-12-19
+   ============================================================================= */
+
+.friends-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.friends-modal {
+  background: #1e1f22;
+  border-radius: 8px;
+  width: 440px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.friends-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid #2b2d31;
+}
+
+.friends-modal-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #f2f3f5;
+  margin: 0;
+}
+
+.friends-modal-close {
+  background: none;
+  border: none;
+  color: #b5bac1;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.friends-modal-close:hover {
+  color: #f2f3f5;
+}
+
+.friends-modal-tabs {
+  display: flex;
+  padding: 0 16px;
+  border-bottom: 1px solid #2b2d31;
+  gap: 4px;
+}
+
+.friends-tab {
+  background: none;
+  border: none;
+  color: #b5bac1;
+  padding: 12px 12px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.friends-tab:hover {
+  color: #f2f3f5;
+}
+
+.friends-tab.active {
+  color: #f2f3f5;
+  border-bottom-color: #5865f2;
+}
+
+.friends-tab .badge {
+  background: #ed4245;
+  color: white;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.friends-modal-content {
+  padding: 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.friends-message {
+  padding: 10px 12px;
+  border-radius: 4px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.friends-message.success {
+  background: rgba(35, 165, 90, 0.2);
+  color: #23a55a;
+  border: 1px solid rgba(35, 165, 90, 0.3);
+}
+
+.friends-message.error {
+  background: rgba(237, 66, 69, 0.2);
+  color: #ed4245;
+  border: 1px solid rgba(237, 66, 69, 0.3);
+}
+
+.friends-add-description {
+  color: #b5bac1;
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+.friends-input-group {
+  display: flex;
+  gap: 8px;
+}
+
+.friends-input {
+  flex: 1;
+  background: #1e1f22;
+  border: 1px solid #3f4147;
+  border-radius: 4px;
+  padding: 10px 12px;
+  color: #f2f3f5;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.friends-input:focus {
+  border-color: #5865f2;
+}
+
+.friends-input::placeholder {
+  color: #6d6f78;
+}
+
+.friends-send-btn {
+  background: #5865f2;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+
+.friends-send-btn:hover:not(:disabled) {
+  background: #4752c4;
+}
+
+.friends-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.friends-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.friends-empty {
+  color: #6d6f78;
+  text-align: center;
+  padding: 24px;
+  font-size: 14px;
+}
+
+.friends-request-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #2b2d31;
+  border-radius: 6px;
+  transition: background 0.15s;
+}
+
+.friends-request-item:hover {
+  background: #32353b;
+}
+
+.friends-request-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #5865f2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 600;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.friends-request-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.friends-request-name {
+  color: #f2f3f5;
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.friends-request-subtitle {
+  color: #6d6f78;
+  font-size: 12px;
+}
+
+.friends-request-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.friends-accept-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: #23a55a;
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.friends-accept-btn:hover {
+  background: #1a7f42;
+}
+
+.friends-reject-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: #ed4245;
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.friends-reject-btn:hover {
+  background: #c93b3e;
+}
+
+.friends-cancel-btn {
+  background: #4e5058;
+  color: #f2f3f5;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.friends-cancel-btn:hover {
+  background: #6d6f78;
+}
+
+/* Add Friend button in user panel */
+.friends-btn {
+  background: none;
+  border: none;
+  color: #b5bac1;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.15s;
+  font-size: 16px;
+}
+
+.friends-btn:hover {
+  background: #3f4147;
+  color: #f2f3f5;
+}
+
+.friends-btn.has-pending {
+  position: relative;
+}
+
+.friends-btn.has-pending::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 8px;
+  height: 8px;
+  background: #ed4245;
+  border-radius: 50%;
 }

@@ -4,6 +4,8 @@ import axios from "axios";
 import useTokenRefresher from "../hooks/useTokenRefresher";
 import AdminPanel from "./AdminPanel";
 import { playInviteChime, playNewMessage, playServerJoined, playMessageSent, playUserOnline, playDoorbellDingDong, playServerClick, playChannelClick } from "../utils/sounds";
+import FriendsModal from "./FriendsModal";
+import { useWebSocket } from "../hooks/useWebSocket";
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -35,6 +37,7 @@ export default function ChatPage() {
   const [leaveServerConfirm, setLeaveServerConfirm] = useState(null);
   const [invitations, setInvitations] = useState([]);
   const [invitationsOpen, setInvitationsOpen] = useState(false);
+  const [pendingFriendRequests, setPendingFriendRequests] = useState([]);
   const [inviteUserModalOpen, setInviteUserModalOpen] = useState(false);
   const [inviteUsername, setInviteUsername] = useState("");
   const [selectedFriendsToInvite, setSelectedFriendsToInvite] = useState([]);
@@ -47,6 +50,7 @@ export default function ChatPage() {
   const [unreadServers, setUnreadServers] = useState({}); // { serverId: true/false }
   const [unreadChannels, setUnreadChannels] = useState({}); // { "serverId-channelName": true/false }
   const [leftSectionWidth, setLeftSectionWidth] = useState(210);
+  const [showFriendsModal, setShowFriendsModal] = useState(false);
   
   const messagesEndRef = useRef(null);
   const resizingRef = useRef(null);
@@ -65,6 +69,96 @@ export default function ChatPage() {
   
   // Track the authenticated user identity for session validation
   const authenticatedUserRef = useRef(null);
+
+  // ==========================================================================
+  // WebSocket for real-time communication
+  // ==========================================================================
+  const handleWebSocketMessage = useCallback((data) => {
+    console.log('[WS] Received:', data.type);
+    
+    if (data.type === 'new_message') {
+      // Handle new channel message from WebSocket
+      const { server_id, channel, message } = data;
+      
+      // Only add message if it's for the currently selected server and channel
+      if (server_id === selectedServerId && channel === selectedChannel) {
+        setMessages(prev => {
+          // Check if message already exists (from our own send or polling)
+          const exists = prev.some(m => m.id === message.id);
+          if (exists) return prev;
+          
+          // Play sound if not from current user
+          if (message.sender !== currentUser) {
+            playNewMessage();
+          }
+          
+          return [...prev, message];
+        });
+      } else {
+        // Message is for a different channel - mark as unread
+        const channelKey = `${server_id}-${channel}`;
+        setUnreadChannels(prev => ({ ...prev, [channelKey]: true }));
+        setUnreadServers(prev => ({ ...prev, [server_id]: true }));
+      }
+    }
+    else if (data.type === 'new_dm') {
+      // Handle new DM message - set unread indicator
+      setHasUnreadDms(true);
+      if (data.message && data.message.sender_username !== currentUser) {
+        setUnreadDmUsers(prev => ({ ...prev, [data.message.sender_username]: true }));
+        playDoorbellDingDong();
+      }
+    }
+    else if (data.type === 'typing') {
+      // Could implement typing indicator UI here
+      console.log('[WS] Typing:', data.username, 'in', data.channel || data.dm_id);
+    }
+    else if (data.type === 'connected') {
+      console.log('[WS] Welcome message received');
+    }
+    else if (data.type === 'user_online') {
+      // User came online - add to onlineUsers
+      console.log('[WS] User online:', data.username);
+      setOnlineUsers(prev => {
+        if (!prev.includes(data.username)) {
+          return [...prev, data.username];
+        }
+        return prev;
+      });
+    }
+    else if (data.type === 'user_offline') {
+      // User went offline - remove from onlineUsers
+      console.log('[WS] User offline:', data.username);
+      setOnlineUsers(prev => prev.filter(u => u !== data.username));
+    }
+    else if (data.type === 'unread_update') {
+      // New message in a channel - update unread indicators
+      const { server_id, channel, sender } = data;
+      
+      // Don't mark as unread if it's from current user or if we're viewing that channel
+      if (sender === currentUser) return;
+      if (server_id === selectedServerId && channel === selectedChannel) return;
+      
+      const channelKey = `${server_id}-${channel}`;
+      setUnreadChannels(prev => ({ ...prev, [channelKey]: true }));
+      setUnreadServers(prev => ({ ...prev, [server_id]: true }));
+    }
+  }, [selectedServerId, selectedChannel, currentUser]);
+
+  const { isConnected: wsConnected, subscribeToServer, unsubscribeFromServer } = useWebSocket(handleWebSocketMessage);
+
+  // Subscribe to current server when it changes
+  useEffect(() => {
+    if (wsConnected && selectedServerId) {
+      console.log('[WS] Subscribing to server:', selectedServerId);
+      subscribeToServer(selectedServerId);
+      
+      return () => {
+        console.log('[WS] Unsubscribing from server:', selectedServerId);
+        unsubscribeFromServer(selectedServerId);
+      };
+    }
+  }, [wsConnected, selectedServerId, subscribeToServer, unsubscribeFromServer]);
 
   // Get current server and its channels
   const currentServer = servers.find(s => s.id === selectedServerId);
@@ -400,6 +494,29 @@ export default function ChatPage() {
     }
   }
 
+  // Friend request handlers for notification bell
+  async function handleAcceptFriendRequest(requestId, fromUsername) {
+    try {
+      await axios.post("/api/friends/accept", { request_id: requestId }, { withCredentials: true });
+      // Reload pending friend requests
+      const res = await axios.get("/api/friends/pending", { withCredentials: true });
+      setPendingFriendRequests(res.data.requests || []);
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to accept friend request");
+    }
+  }
+
+  async function handleRejectFriendRequest(requestId) {
+    try {
+      await axios.post("/api/friends/reject", { request_id: requestId }, { withCredentials: true });
+      // Reload pending friend requests
+      const res = await axios.get("/api/friends/pending", { withCredentials: true });
+      setPendingFriendRequests(res.data.requests || []);
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to reject friend request");
+    }
+  }
+
   // Resize handlers
   const handleResizeStart = (e) => {
     resizingRef.current = 'left-section';
@@ -617,7 +734,7 @@ export default function ChatPage() {
       }
       
       loadMessages(selectedChannel, selectedServerId);
-    }, 5000);
+    }, 30000); // Reduced to 30s - WebSocket handles real-time updates
     
     return () => clearInterval(id);
   }, [selectedChannel, selectedServerId, verifySession]);
@@ -648,26 +765,40 @@ export default function ChatPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // Poll invitations every 5 seconds for real-time bell notifications
+  // Poll invitations and friend requests for real-time bell notifications
   useEffect(() => {
-    const pollInvitations = async () => {
+    const pollNotifications = async () => {
       try {
-        const resp = await axios.get("/api/invitations", {
+        // Fetch server invitations
+        const invResp = await axios.get("/api/invitations", {
           withCredentials: true,
         });
-        const newInvites = resp.data.invitations || [];
+        const newInvites = invResp.data.invitations || [];
         setInvitations(prev => {
           if (newInvites.length > prev.length) {
             playInviteChime();
           }
           return newInvites;
         });
+        
+        // Fetch pending friend requests
+        const friendResp = await axios.get("/api/friends/pending", {
+          withCredentials: true,
+        });
+        const newFriendReqs = friendResp.data.requests || [];
+        setPendingFriendRequests(prev => {
+          if (newFriendReqs.length > prev.length) {
+            playInviteChime();
+          }
+          return newFriendReqs;
+        });
       } catch (err) {
         // Silently fail - dont spam console
       }
     };
     
-    const interval = setInterval(pollInvitations, 30000); // 30 seconds
+    pollNotifications(); // Initial fetch
+    const interval = setInterval(pollNotifications, 60000); // 60 seconds
     return () => clearInterval(interval);
   }, []);
 
@@ -718,7 +849,7 @@ export default function ChatPage() {
       }
     };
     
-    const interval = setInterval(pollServers, 10000); // 10 seconds
+    const interval = setInterval(pollServers, 120000); // 120 seconds (rarely changes)
     return () => clearInterval(interval);
   }, [servers, selectedServerId]);
 
@@ -771,7 +902,7 @@ export default function ChatPage() {
       }
     };
     
-    const interval = setInterval(pollChannels, 30000); // 30 seconds
+    const interval = setInterval(pollChannels, 120000); // 120 seconds (rarely changes)
     return () => clearInterval(interval);
   }, [selectedServerId]);
 
@@ -805,7 +936,7 @@ export default function ChatPage() {
     };
     
     pollOnlineUsers(); // Initial fetch
-    const interval = setInterval(pollOnlineUsers, 10000); // 10 seconds
+    const interval = setInterval(pollOnlineUsers, 60000); // 60 seconds (WebSocket handles real-time)
     return () => clearInterval(interval);
   }, [currentUser]);
 
@@ -862,7 +993,7 @@ export default function ChatPage() {
     };
     
     pollDms(); // Initial poll
-    const interval = setInterval(pollDms, 30000); // 30 seconds
+    const interval = setInterval(pollDms, 60000); // 60 seconds
     return () => clearInterval(interval);
   }, [currentUser]);
   // Poll for unread messages in servers and channels
@@ -872,7 +1003,7 @@ export default function ChatPage() {
     if (!currentUser || servers.length === 0) return;
     
     fetchUnreadStatus(); // Initial fetch
-    const interval = setInterval(fetchUnreadStatus, 60000); // 60 seconds
+    const interval = setInterval(fetchUnreadStatus, 120000); // 120 seconds (WebSocket handles real-time)
     return () => clearInterval(interval);
   }, [currentUser, servers.length]);
 
@@ -1244,8 +1375,8 @@ export default function ChatPage() {
               title="Invitations"
             >
               🔔
-              {invitations.length > 0 && (
-                <span className="bcord-invitations-badge">{invitations.length}</span>
+              {(invitations.length + pendingFriendRequests.length) > 0 && (
+                <span className="bcord-invitations-badge">{invitations.length + pendingFriendRequests.length}</span>
               )}
             </button>
             {invitationsOpen && (
@@ -1256,7 +1387,7 @@ export default function ChatPage() {
                 />
                 <div className="bcord-invitations-panel">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <h3 style={{ margin: 0 }}>Server Invitations</h3>
+                  <h3 style={{ margin: 0 }}>Notifications</h3>
                   <button
                     onClick={() => setInvitationsOpen(false)}
                     style={{
@@ -1273,34 +1404,71 @@ export default function ChatPage() {
                     ×
                   </button>
                 </div>
-                {invitations.length === 0 ? (
-                  <p className="bcord-no-invitations">No pending invitations</p>
-                ) : (
-                  <div className="bcord-invitations-list">
-                    {invitations.map((inv) => (
-                      <div key={inv.server_id} className="bcord-invitation-item">
-                        <div className="bcord-invitation-info">
-                          <div className="bcord-invitation-server">{inv.server_name}</div>
-                          <div className="bcord-invitation-from">from {inv.inviter}</div>
+                {/* Server Invitations Section */}
+                <div style={{ marginBottom: '16px' }}>
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#9ca3af', textTransform: 'uppercase' }}>Server Invitations</h4>
+                  {invitations.length === 0 ? (
+                    <p className="bcord-no-invitations" style={{ margin: '4px 0' }}>No pending server invitations</p>
+                  ) : (
+                    <div className="bcord-invitations-list">
+                      {invitations.map((inv) => (
+                        <div key={inv.server_id} className="bcord-invitation-item">
+                          <div className="bcord-invitation-info">
+                            <div className="bcord-invitation-server">{inv.server_name}</div>
+                            <div className="bcord-invitation-from">from {inv.inviter}</div>
+                          </div>
+                          <div className="bcord-invitation-actions">
+                            <button
+                              className="bcord-invitation-accept"
+                              onClick={() => handleAcceptInvitation(inv.server_id)}
+                            >
+                              ✓
+                            </button>
+                            <button
+                              className="bcord-invitation-decline"
+                              onClick={() => handleDeclineInvitation(inv.server_id)}
+                            >
+                              ✗
+                            </button>
+                          </div>
                         </div>
-                        <div className="bcord-invitation-actions">
-                          <button
-                            className="bcord-invitation-accept"
-                            onClick={() => handleAcceptInvitation(inv.server_id)}
-                          >
-                            ✓ Accept
-                          </button>
-                          <button
-                            className="bcord-invitation-decline"
-                            onClick={() => handleDeclineInvitation(inv.server_id)}
-                          >
-                            ✗ Decline
-                          </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Friend Requests Section */}
+                <div>
+                  <h4 style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#9ca3af', textTransform: 'uppercase' }}>Friend Requests</h4>
+                  {pendingFriendRequests.length === 0 ? (
+                    <p className="bcord-no-invitations" style={{ margin: '4px 0' }}>No pending friend requests</p>
+                  ) : (
+                    <div className="bcord-invitations-list">
+                      {pendingFriendRequests.map((req) => (
+                        <div key={req.id} className="bcord-invitation-item">
+                          <div className="bcord-invitation-info">
+                            <div className="bcord-invitation-server">{req.username}</div>
+                            <div className="bcord-invitation-from">wants to be friends</div>
+                          </div>
+                          <div className="bcord-invitation-actions">
+                            <button
+                              className="bcord-invitation-accept"
+                              onClick={() => handleAcceptFriendRequest(req.id, req.username)}
+                            >
+                              ✓
+                            </button>
+                            <button
+                              className="bcord-invitation-decline"
+                              onClick={() => handleRejectFriendRequest(req.id)}
+                            >
+                              ✗
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
               </>
             )}
@@ -2111,6 +2279,16 @@ export default function ChatPage() {
                 <span className="icon">🔒</span>
                 <span className="label">Privacy</span>
               </button>
+              <button 
+                className="profile-menu-item" 
+                onClick={() => {
+                  setProfileMenuOpen(false);
+                  setShowFriendsModal(true);
+                }}
+              >
+                <span className="icon">👥</span>
+                <span className="label">Friends</span>
+              </button>
               {isAdmin && (
                 <button 
                   className="profile-menu-item" 
@@ -2134,6 +2312,12 @@ export default function ChatPage() {
           </div>
         </div>
       )}
+
+      {/* Friends Modal */}
+      <FriendsModal 
+        isOpen={showFriendsModal} 
+        onClose={() => setShowFriendsModal(false)} 
+      />
     </div>
   );
 }

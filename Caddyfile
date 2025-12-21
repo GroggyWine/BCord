@@ -102,10 +102,10 @@ https://bekord.com, https://www.bekord.com {
         reverse_proxy bcord-backend:9000
     }
 
-    # Rumble API - routes to backend (backend handles the Rumble fetching)
+    # Rumble API - routes to main backend (integrated)
     @rumble_api path /api/rumble/*
     handle @rumble_api {
-        reverse_proxy bcord-rumble-api:3099
+        reverse_proxy bcord-backend:9000
     }
 
     # Rate limiting: General API (100 req/min)
@@ -130,9 +130,15 @@ https://bekord.com, https://www.bekord.com {
         reverse_proxy bcord-backend:9000
     }
 
-    # WebSocket upgrades
-    @ws path /ws*
-    reverse_proxy @ws bcord-backend:9000
+    # WebSocket upgrades - MUST use handle to take priority over static files
+    @websocket {
+        path /ws
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    handle @websocket {
+        reverse_proxy bcord-backend:9000
+    }
 
     # Static frontend (React SPA) - serves index.html for all routes
     handle {

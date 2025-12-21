@@ -21,6 +21,7 @@ add_executable(BCordServer
   src/send_email.cpp
   src/email_templates.cpp
   src/totp_utils.cpp
+  src/websocket_manager.cpp
 )
 
 # Include dirs

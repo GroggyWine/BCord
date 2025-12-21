@@ -197,3 +197,14 @@ export function playChannelClick() {
     console.warn('Sound error:', e);
   }
 }
+
+// 13. LEAVE DM - same as server click for consistent navigation sounds
+export function playLeaveDm() {
+  try {
+    // Same as playServerClick - consistent blip for all navigation
+    playTone(500, 0.06, 'sine', 0.12, 0);
+    playTone(700, 0.08, 'sine', 0.1, 0.03);
+  } catch (e) {
+    console.warn('Sound error:', e);
+  }
+}

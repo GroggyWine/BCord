@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 import useTokenRefresher from "../hooks/useTokenRefresher";
-import { playDoorbellDingDong, playMessageSent, playChannelClick } from "../utils/sounds";
+import { playDoorbellDingDong, playMessageSent, playChannelClick, playInviteChime, playLeaveDm, playServerClick } from "../utils/sounds";
 
+import FriendsModal from "./FriendsModal";
+import { useWebSocket } from "../hooks/useWebSocket";
 export default function DmPage() {
   const { dmId } = useParams();
   const navigate = useNavigate();
@@ -28,12 +30,17 @@ export default function DmPage() {
   const [friends, setFriends] = useState([]);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
   const [hasUnreadDms, setHasUnreadDms] = useState(false);
+  const [unreadDmUsers, setUnreadDmUsers] = useState({}); // { dm_id: true/false }
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminPanelOpen, setAdminPanelOpen] = useState(false);
   const [adminPassword, setAdminPassword] = useState("");
   const [adminPanelError, setAdminPanelError] = useState("");
   const [adminVerified, setAdminVerified] = useState(false);
+  const [showFriendsModal, setShowFriendsModal] = useState(false);
+  const [invitations, setInvitations] = useState([]);
+  const [invitationsOpen, setInvitationsOpen] = useState(false);
+  const [pendingFriendRequests, setPendingFriendRequests] = useState([]);
   const [users, setUsers] = useState([]);
   
   const messagesEndRef = useRef(null);
@@ -43,6 +50,73 @@ export default function DmPage() {
   const resizingRef = useRef(null);
 
   const userInitials = currentUser ? currentUser.slice(0, 2).toUpperCase() : "??";
+
+  // ==========================================================================
+  // WebSocket for real-time DM communication
+  // ==========================================================================
+  const handleWebSocketMessage = useCallback((data) => {
+    console.log('[WS DM] Received:', data.type);
+    
+    if (data.type === 'new_dm') {
+      // Handle new DM from WebSocket
+      const { dm_id, message } = data;
+      const senderUsername = message?.sender_username;
+      const dmIdNum = Number(dm_id);
+      
+      // If sender is current user, ignore (we already added it locally)
+      if (senderUsername === currentUser) {
+        // Just add to messages if we're viewing this DM
+        if (dmIdNum === selectedDmId) {
+          setMessages(prev => {
+            const exists = prev.some(m => m.dm_message_id === message.dm_message_id);
+            if (exists) return prev;
+            return [...prev, message];
+          });
+        }
+        // Never show unread indicator for our own messages
+        return;
+      }
+      
+      // Message is from someone else
+      // If this DM is currently selected, add message to list (no unread indicator needed)
+      if (dmIdNum === selectedDmId) {
+        setMessages(prev => {
+          const exists = prev.some(m => m.dm_message_id === message.dm_message_id);
+          if (exists) return prev;
+          return [...prev, message];
+        });
+        // Don't mark as unread since user is viewing this chat
+        return;
+      }
+      
+      // Message is for a different DM - mark it as unread
+      playDoorbellDingDong();
+      setHasUnreadDms(true);
+      // Update dmList to show unread for this specific DM
+      setDmList(prev => prev.map(d => 
+        d.dm_id === dmIdNum ? { ...d, has_unread: true } : d
+      ));
+    }
+    else if (data.type === 'typing' && data.dm_id) {
+      // Could show typing indicator here
+      console.log(`[WS DM] ${data.username} is typing in DM ${data.dm_id}`);
+    }
+    else if (data.type === 'user_online') {
+      setOnlineUsers(prev => [...new Set([...prev, data.username])]);
+    }
+    else if (data.type === 'user_offline') {
+      setOnlineUsers(prev => prev.filter(u => u !== data.username));
+    }
+  }, [selectedDmId, currentUser]);
+
+  const { send: wsSend, subscribeToDm, isConnected: wsConnected } = useWebSocket(handleWebSocketMessage);
+
+  // Subscribe to current DM when it changes
+  useEffect(() => {
+    if (selectedDmId && wsConnected) {
+      subscribeToDm(selectedDmId);
+    }
+  }, [selectedDmId, wsConnected, subscribeToDm]);
 
   // Load current user and check admin status
   useEffect(() => {
@@ -90,7 +164,6 @@ export default function DmPage() {
       try {
         const res = await axios.get("/api/dm/list", { withCredentials: true });
         let list = res.data?.dms || (Array.isArray(res.data) ? res.data : []);
-        setDmList(list);
         
         if (dmId) {
           const targetId = Number(dmId);
@@ -98,8 +171,23 @@ export default function DmPage() {
           if (match) {
             setSelectedDmId(targetId);
             setOtherUsername(match.other_username || "Unknown");
+            
+            // Mark this DM as not unread in local state since we're viewing it
+            list = list.map(dm => 
+              dm.dm_id === targetId ? { ...dm, has_unread: false } : dm
+            );
+            
+            // Call mark-read API for this DM
+            axios.post(`/api/dm/${targetId}/mark-read`, {}, { withCredentials: true }).catch(() => {});
           }
         }
+        
+        setDmList(list);
+        
+        // Update hasUnreadDms based on list (exclude selected DM)
+        const anyUnread = list.some(dm => dm.has_unread);
+        setHasUnreadDms(anyUnread);
+        
       } catch (err) {
         console.error("Load DM list error:", err);
       } finally {
@@ -133,7 +221,7 @@ export default function DmPage() {
     };
 
     loadMessages();
-    const interval = setInterval(loadMessages, 5000);
+    const interval = setInterval(loadMessages, 30000); // Reduced to 30s - WebSocket handles real-time
     return () => clearInterval(interval);
   }, [selectedDmId, currentUser]);
 
@@ -148,11 +236,21 @@ export default function DmPage() {
       try {
         const res = await axios.get("/api/dm/list", { withCredentials: true });
         let list = res.data?.dms || (Array.isArray(res.data) ? res.data : []);
+        
+        // Don't mark current DM as unread since we're viewing it
+        list = list.map(dm => 
+          dm.dm_id === selectedDmId ? { ...dm, has_unread: false } : dm
+        );
+        
         setDmList(prev => JSON.stringify(prev) !== JSON.stringify(list) ? list : prev);
+        
+        // Update hasUnreadDms - exclude current DM
+        const anyUnread = list.some(dm => dm.has_unread && dm.dm_id !== selectedDmId);
+        setHasUnreadDms(anyUnread);
       } catch (err) {}
-    }, 5000);
+    }, 30000); // 30 seconds
     return () => clearInterval(interval);
-  }, []);
+  }, [selectedDmId]);
 
   // Load Rumble lineup
   useEffect(() => {
@@ -225,6 +323,43 @@ export default function DmPage() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
+  // Poll invitations and friend requests for real-time bell notifications
+  useEffect(() => {
+    const pollNotifications = async () => {
+      try {
+        // Fetch server invitations
+        const invResp = await axios.get("/api/invitations", {
+          withCredentials: true,
+        });
+        const newInvites = invResp.data.invitations || [];
+        setInvitations(prev => {
+          if (newInvites.length > prev.length) {
+            playInviteChime();
+          }
+          return newInvites;
+        });
+        
+        // Fetch pending friend requests
+        const friendResp = await axios.get("/api/friends/pending", {
+          withCredentials: true,
+        });
+        const newFriendReqs = friendResp.data.requests || [];
+        setPendingFriendRequests(prev => {
+          if (newFriendReqs.length > prev.length) {
+            playInviteChime();
+          }
+          return newFriendReqs;
+        });
+      } catch (err) {
+        // Silently fail - dont spam console
+      }
+    };
+    
+    pollNotifications(); // Initial fetch
+    const interval = setInterval(pollNotifications, 30000); // 30 seconds
+    return () => clearInterval(interval);
+  }, []);
+
   // Close friends drawer on outside click
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -256,6 +391,47 @@ export default function DmPage() {
     document.removeEventListener('mouseup', handleResizeEnd);
   }, [handleResizeMove]);
 
+  // Notification handlers
+  async function handleAcceptInvitation(serverId) {
+    try {
+      await axios.post(`/api/invitations/${serverId}/accept`, {}, { withCredentials: true });
+      const invRes = await axios.get("/api/invitations", { withCredentials: true });
+      setInvitations(invRes.data.invitations || []);
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to accept invitation");
+    }
+  }
+
+  async function handleDeclineInvitation(serverId) {
+    try {
+      await axios.post(`/api/invitations/${serverId}/decline`, {}, { withCredentials: true });
+      const invRes = await axios.get("/api/invitations", { withCredentials: true });
+      setInvitations(invRes.data.invitations || []);
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to decline invitation");
+    }
+  }
+
+  async function handleAcceptFriendRequest(requestId, fromUsername) {
+    try {
+      await axios.post("/api/friends/accept", { request_id: requestId }, { withCredentials: true });
+      const res = await axios.get("/api/friends/pending", { withCredentials: true });
+      setPendingFriendRequests(res.data.requests || []);
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to accept friend request");
+    }
+  }
+
+  async function handleRejectFriendRequest(requestId) {
+    try {
+      await axios.post("/api/friends/reject", { request_id: requestId }, { withCredentials: true });
+      const res = await axios.get("/api/friends/pending", { withCredentials: true });
+      setPendingFriendRequests(res.data.requests || []);
+    } catch (err) {
+      alert(err.response?.data?.error || "Failed to reject friend request");
+    }
+  }
+
   const sendMessage = async () => {
     if (!selectedDmId || !newBody.trim() || sending) return;
     
@@ -269,10 +445,25 @@ export default function DmPage() {
       playMessageSent();
       setNewBody("");
       
+      // Mark as read since we're actively sending in this chat
+      await axios.post(`/api/dm/${selectedDmId}/mark-read`, {}, { withCredentials: true }).catch(() => {});
+      
       const res = await axios.get(`/api/dm/thread?dm_id=${selectedDmId}`, { withCredentials: true });
       let msgs = res.data?.messages || (Array.isArray(res.data) ? res.data : []);
       prevMessageCountRef.current = msgs.length;
       setMessages(msgs);
+      
+      // Ensure this DM is not marked as unread
+      setDmList(prev => prev.map(d => 
+        d.dm_id === selectedDmId ? { ...d, has_unread: false } : d
+      ));
+      
+      // Recalculate hasUnreadDms excluding current DM
+      setDmList(prev => {
+        const anyUnread = prev.some(d => d.dm_id !== selectedDmId && d.has_unread);
+        setHasUnreadDms(anyUnread);
+        return prev;
+      });
     } catch (err) {
       console.error("Send error:", err);
       alert("Failed to send message");
@@ -282,17 +473,34 @@ export default function DmPage() {
     }
   };
 
-  const selectDm = (dm) => {
+  const selectDm = async (dm) => {
     if (dm.dm_id === selectedDmId) return;
-    playChannelClick();
+    playServerClick();
     setSelectedDmId(dm.dm_id);
     setOtherUsername(dm.other_username || "Unknown");
     setMessages([]);
     prevMessageCountRef.current = 0;
     navigate(`/dm/${dm.dm_id}`, { replace: true });
+    
+    // Mark DM as read
+    try {
+      await axios.post(`/api/dm/${dm.dm_id}/mark-read`, {}, { withCredentials: true });
+      // Update local state to remove unread indicator
+      setDmList(prev => prev.map(d => 
+        d.dm_id === dm.dm_id ? { ...d, has_unread: false } : d
+      ));
+      // Recalculate hasUnreadDms
+      setHasUnreadDms(prev => {
+        const remaining = dmList.filter(d => d.dm_id !== dm.dm_id && d.has_unread);
+        return remaining.length > 0;
+      });
+    } catch (err) {
+      console.error("Failed to mark DM as read:", err);
+    }
   };
 
   const handleSelectServer = (serverId) => {
+    playLeaveDm();
     navigate("/chat");
   };
 
@@ -419,7 +627,113 @@ export default function DmPage() {
           
         </div>
         <div className="bcord-chat-topbar-right">
-          <div className="bcord-chat-topbar-bell">🔔</div>
+          {/* Notifications Bell */}
+          <div className="bcord-invitations-container">
+            <button
+              className="bcord-invitations-bell-btn"
+              onClick={() => setInvitationsOpen(!invitationsOpen)}
+              title="Notifications"
+            >
+              🔔
+              {(invitations.length + pendingFriendRequests.length) > 0 && (
+                <span className="bcord-invitations-badge">{invitations.length + pendingFriendRequests.length}</span>
+              )}
+            </button>
+            {invitationsOpen && (
+              <>
+                <div 
+                  className="bcord-invitations-overlay"
+                  onClick={() => setInvitationsOpen(false)}
+                />
+                <div className="bcord-invitations-panel">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <h3 style={{ margin: 0 }}>Notifications</h3>
+                    <button
+                      onClick={() => setInvitationsOpen(false)}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: '#9ca3af',
+                        fontSize: '20px',
+                        cursor: 'pointer',
+                        padding: '4px 8px',
+                        lineHeight: '1'
+                      }}
+                      title="Close"
+                    >
+                      ×
+                    </button>
+                  </div>
+
+                  {/* Server Invitations Section */}
+                  <div style={{ marginBottom: '16px' }}>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#9ca3af', textTransform: 'uppercase' }}>Server Invitations</h4>
+                    {invitations.length === 0 ? (
+                      <p className="bcord-no-invitations" style={{ margin: '4px 0' }}>No pending server invitations</p>
+                    ) : (
+                      <div className="bcord-invitations-list">
+                        {invitations.map((inv) => (
+                          <div key={inv.server_id} className="bcord-invitation-item">
+                            <div className="bcord-invitation-info">
+                              <div className="bcord-invitation-server">{inv.server_name}</div>
+                              <div className="bcord-invitation-from">from {inv.inviter}</div>
+                            </div>
+                            <div className="bcord-invitation-actions">
+                              <button
+                                className="bcord-invitation-accept"
+                                onClick={() => handleAcceptInvitation(inv.server_id)}
+                              >
+                                ✓
+                              </button>
+                              <button
+                                className="bcord-invitation-decline"
+                                onClick={() => handleDeclineInvitation(inv.server_id)}
+                              >
+                                ✗
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Friend Requests Section */}
+                  <div>
+                    <h4 style={{ margin: '0 0 8px 0', fontSize: '12px', color: '#9ca3af', textTransform: 'uppercase' }}>Friend Requests</h4>
+                    {pendingFriendRequests.length === 0 ? (
+                      <p className="bcord-no-invitations" style={{ margin: '4px 0' }}>No pending friend requests</p>
+                    ) : (
+                      <div className="bcord-invitations-list">
+                        {pendingFriendRequests.map((req) => (
+                          <div key={req.id} className="bcord-invitation-item">
+                            <div className="bcord-invitation-info">
+                              <div className="bcord-invitation-server">{req.username}</div>
+                              <div className="bcord-invitation-from">wants to be friends</div>
+                            </div>
+                            <div className="bcord-invitation-actions">
+                              <button
+                                className="bcord-invitation-accept"
+                                onClick={() => handleAcceptFriendRequest(req.id, req.username)}
+                              >
+                                ✓
+                              </button>
+                              <button
+                                className="bcord-invitation-decline"
+                                onClick={() => handleRejectFriendRequest(req.id)}
+                              >
+                                ✗
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -492,6 +806,7 @@ export default function DmPage() {
                       onClick={() => selectDm(dm)}
                     >
                       <div className="bcord-chat-room-content">
+                        {dm.has_unread && selectedDmId !== dm.dm_id && <span className="dm-user-unread-dot" />}
                         <span className="hash">@</span>
                         <span className="label">{dm.other_username || "Unknown"}</span>
                         {onlineUsers.includes(dm.other_username) && (
@@ -689,6 +1004,16 @@ export default function DmPage() {
                 <span className="icon">🔒</span>
                 <span className="label">Privacy</span>
               </button>
+              <button 
+                className="profile-menu-item" 
+                onClick={() => {
+                  setProfileMenuOpen(false);
+                  setShowFriendsModal(true);
+                }}
+              >
+                <span className="icon">👥</span>
+                <span className="label">Friends</span>
+              </button>
               {isAdmin && (
                 <button 
                   className="profile-menu-item" 
@@ -761,6 +1086,12 @@ export default function DmPage() {
           </div>
         </div>
       )}
+
+      {/* Friends Modal */}
+      <FriendsModal 
+        isOpen={showFriendsModal} 
+        onClose={() => setShowFriendsModal(false)} 
+      />
     </div>
   );
 }

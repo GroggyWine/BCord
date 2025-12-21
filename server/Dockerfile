@@ -45,9 +45,9 @@ COPY ./ /app
 
 RUN echo "📁 Listing /app contents:" && find /app -maxdepth 2 -type f
 
-# Compile
+# Compile (use -j1 to prevent swap-thrash on low-RAM hosts; -v for continuous output)
 RUN cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build build -j$(nproc)
+    ninja -C build -j1 -v
 
 # ------------------------
 # Stage 2 — Runtime
@@ -61,7 +61,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl wget iputils-ping \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
 
 # Copy Redis++ shared libraries and BCord binary
 COPY --from=build /usr/local/lib/libredis++.so* /usr/local/lib/

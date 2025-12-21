@@ -30,6 +30,7 @@
 #include "metrics.h"
 #include "auth.h"
 #include "db_init.h"
+#include "websocket_manager.h"
 
 namespace net = boost::asio;
 namespace beast = boost::beast;
@@ -526,7 +527,20 @@ static nlohmann::json list_dms_for_user(pqxx::connection& conn,
         "     ORDER BY dm.created_at DESC "
         "     LIMIT 1), "
         "    dc.created_at::text "
-        "  ) AS last_message_time "
+        "  ) AS last_message_time, "
+        "  COALESCE( "
+        "    (SELECT MAX(dm.dm_message_id) "
+        "     FROM direct_messages dm "
+        "     WHERE dm.dm_id = dc.dm_id "
+        "       AND dm.deleted_by_admin = FALSE), "
+        "    0 "
+        "  ) AS latest_message_id, "
+        "  COALESCE( "
+        "    (SELECT udr.last_read_message_id "
+        "     FROM user_dm_reads udr "
+        "     WHERE udr.dm_id = dc.dm_id AND udr.user_id = $1), "
+        "    0 "
+        "  ) AS last_read_id "
         "FROM direct_conversations dc "
         "JOIN users u ON u.id = CASE "
         "  WHEN dc.user1_id = $1 THEN dc.user2_id "
@@ -540,12 +554,19 @@ static nlohmann::json list_dms_for_user(pqxx::connection& conn,
     nlohmann::json arr = nlohmann::json::array();
 
     for (const auto& row : r) {
+        int64_t latest_msg = row["latest_message_id"].as<int64_t>();
+        int64_t last_read = row["last_read_id"].as<int64_t>();
+        bool has_unread = (latest_msg > last_read);
+        
         nlohmann::json item;
         item["dm_id"] = row["dm_id"].as<int64_t>();
         item["other_user_id"] = row["other_user_id"].as<int64_t>();
         item["other_username"] = row["other_username"].c_str();
         item["last_message_content"] = row["last_message_content"].c_str();
         item["last_message_time"] = row["last_message_time"].c_str();
+        item["has_unread"] = has_unread;
+        item["latest_message_id"] = latest_msg;
+        item["last_read_id"] = last_read;
         arr.push_back(item);
     }
 
@@ -981,6 +1002,30 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                 {"server_id", server_id}
             };
 
+            // Broadcast new message via WebSocket to all users subscribed to this server
+            nlohmann::json ws_event;
+            ws_event["type"] = "new_message";
+            ws_event["server_id"] = server_id;
+            ws_event["channel"] = channel_name;
+            ws_event["channel_id"] = channel_id;
+            ws_event["message"] = {
+                {"id", msg_id},
+                {"sender", username},
+                {"body", body_txt},
+                {"created_at", created}
+            };
+            WebSocketManager::instance().send_to_server(server_id, ws_event);
+            
+            // Also broadcast unread_update so clients can update their unread indicators
+            nlohmann::json unread_event;
+            unread_event["type"] = "unread_update";
+            unread_event["server_id"] = server_id;
+            unread_event["channel"] = channel_name;
+            unread_event["channel_id"] = channel_id;
+            unread_event["latest_message_id"] = msg_id;
+            unread_event["sender"] = username;
+            WebSocketManager::instance().send_to_server(server_id, unread_event);
+
             res.set(http::field::content_type, "application/json");
             res.body() = resp.dump();
         } catch (const std::exception &e) {
@@ -1147,15 +1192,72 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             }
 
             int64_t dm_id = j["dm_id"].get<int64_t>();
-            std::string content = j["content"].get<std::string>();
+            std::string msg_content = j["content"].get<std::string>();
 
             pqxx::connection db(PG_CONN);
             UserInfo me = load_user_info(db, current_username);
 
-            send_dm_message(db, me.id, dm_id, content);
+            // Insert DM message and get ID + timestamp
+            pqxx::work txn{db};
+            
+            // Verify membership
+            auto check = txn.exec_params(
+                "SELECT user1_id, user2_id FROM direct_conversations "
+                "WHERE dm_id = $1 AND (user1_id = $2 OR user2_id = $2)",
+                dm_id, me.id
+            );
+            if (check.empty()) {
+                throw std::runtime_error("not a member of this DM");
+            }
+            
+            int64_t other_user_id = (check[0]["user1_id"].as<int64_t>() == me.id) 
+                ? check[0]["user2_id"].as<int64_t>() 
+                : check[0]["user1_id"].as<int64_t>();
+            
+            // Get other username
+            auto other_user = txn.exec_params(
+                "SELECT username FROM users WHERE id = $1", other_user_id
+            );
+            std::string other_username = other_user[0]["username"].as<std::string>();
+            
+            // Insert message
+            auto insert_result = txn.exec_params(
+                "INSERT INTO direct_messages (dm_id, sender_id, content) "
+                "VALUES ($1, $2, $3) RETURNING dm_message_id, created_at::text",
+                dm_id, me.id, msg_content
+            );
+            
+            int64_t msg_id = insert_result[0]["dm_message_id"].as<int64_t>();
+            std::string created_at = insert_result[0]["created_at"].as<std::string>();
+            
+            // Update last_message_at
+            txn.exec_params(
+                "UPDATE direct_conversations SET last_message_at = NOW() WHERE dm_id = $1",
+                dm_id
+            );
+            
+            txn.commit();
+
+            // Broadcast DM message via WebSocket
+            nlohmann::json ws_event;
+            ws_event["type"] = "new_dm";
+            ws_event["dm_id"] = dm_id;
+            ws_event["message"] = {
+                {"dm_message_id", msg_id},
+                {"sender_id", me.id},
+                {"sender_username", current_username},
+                {"content", msg_content},
+                {"created_at", created_at}
+            };
+            
+            // Send to both users in the DM
+            WebSocketManager::instance().send_to_user(current_username, ws_event);
+            WebSocketManager::instance().send_to_user(other_username, ws_event);
 
             nlohmann::json out;
             out["status"] = "ok";
+            out["dm_message_id"] = msg_id;
+            out["created_at"] = created_at;
 
             res.result(http::status::ok);
             res.set(http::field::content_type, "application/json");
@@ -2359,15 +2461,72 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         }
     }
     
-    // GET /api/servers/:id/unread - Get unread status for server (stub)
+    // GET /api/servers/:id/unread - Get unread status for all channels in server
     else if (path.rfind("/api/servers/", 0) == 0 && 
              path.find("/unread") != std::string::npos && 
              method == http::verb::get) {
-        nlohmann::json out;
-        out["channels"] = nlohmann::json::array();
-        res.result(http::status::ok);
-        res.set(http::field::content_type, "application/json");
-        res.body() = out.dump();
+        try {
+            std::string username = authenticate_request(req);
+            
+            // Extract server ID from path: /api/servers/{id}/unread
+            std::string path_copy = path;
+            size_t start = std::string("/api/servers/").length();
+            size_t end = path_copy.find("/unread");
+            std::string server_id_str = path_copy.substr(start, end - start);
+            long long server_id = std::stoll(server_id_str);
+            
+            pqxx::connection db(PG_CONN);
+            pqxx::work txn(db);
+            
+            // Get all channels for this server with their latest message ID
+            // and user's last read message ID
+            auto result = txn.exec_params(R"(
+                SELECT 
+                    c.id as channel_id,
+                    c.name as channel_name,
+                    COALESCE(
+                        (SELECT MAX(m.id) FROM messages m WHERE m.channel_id = c.id),
+                        0
+                    ) as latest_message_id,
+                    COALESCE(ucr.last_read_message_id, 0) as last_read_id
+                FROM channels c
+                LEFT JOIN user_channel_reads ucr 
+                    ON ucr.channel_id = c.id AND ucr.username = $1
+                WHERE c.server_id = $2
+                ORDER BY c.name
+            )", username, server_id);
+            
+            txn.commit();
+            
+            nlohmann::json channels_arr = nlohmann::json::array();
+            for (const auto& row : result) {
+                long long latest_msg = row["latest_message_id"].as<long long>();
+                long long last_read = row["last_read_id"].as<long long>();
+                bool has_unread = (latest_msg > last_read);
+                
+                nlohmann::json ch;
+                ch["channel_id"] = row["channel_id"].as<long long>();
+                ch["channel_name"] = row["channel_name"].c_str();
+                ch["has_unread"] = has_unread;
+                ch["latest_message_id"] = latest_msg;
+                ch["last_read_id"] = last_read;
+                channels_arr.push_back(ch);
+            }
+            
+            nlohmann::json out;
+            out["channels"] = channels_arr;
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            nlohmann::json err_out;
+            err_out["error"] = e.what();
+            err_out["channels"] = nlohmann::json::array();
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = err_out.dump();
+        }
     }
     
     // POST /api/servers/:id/invite - Invite user to server (stub)
@@ -2382,16 +2541,90 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         res.body() = out.dump();
     }
     
-    // POST /api/servers/:id/leave - Leave server (stub)
+    // POST /api/servers/:id/leave - Leave server and post goodbye message
     else if (path.rfind("/api/servers/", 0) == 0 && 
              path.find("/leave") != std::string::npos && 
              method == http::verb::post) {
-        nlohmann::json out;
-        out["status"] = "ok";
-        out["message"] = "left server";
-        res.result(http::status::ok);
-        res.set(http::field::content_type, "application/json");
-        res.body() = out.dump();
+        try {
+            std::string username = authenticate_request(req);
+            
+            // Extract server ID from path: /api/servers/{id}/leave
+            std::string path_copy = path;
+            size_t start = std::string("/api/servers/").length();
+            size_t end = path_copy.find("/leave");
+            std::string server_id_str = path_copy.substr(start, end - start);
+            int64_t server_id = std::stoll(server_id_str);
+            
+            pqxx::connection db(PG_CONN);
+            pqxx::work txn(db);
+            
+            // Get server name
+            auto server_result = txn.exec_params(
+                "SELECT name FROM servers WHERE id = $1",
+                server_id
+            );
+            
+            if (server_result.empty()) {
+                throw std::runtime_error("Server not found");
+            }
+            
+            std::string server_name = server_result[0]["name"].as<std::string>();
+            
+            // Check if user is a member (and not owner)
+            auto member_result = txn.exec_params(
+                "SELECT role FROM server_members WHERE server_id = $1 AND username = $2",
+                server_id, username
+            );
+            
+            if (member_result.empty()) {
+                throw std::runtime_error("You are not a member of this server");
+            }
+            
+            std::string role = member_result[0]["role"].as<std::string>();
+            if (role == "owner") {
+                throw std::runtime_error("Owners cannot leave their own server. Delete the server instead.");
+            }
+            
+            // Find the general channel for this server
+            auto channel_result = txn.exec_params(
+                "SELECT id FROM channels WHERE server_id = $1 AND name = 'general' LIMIT 1",
+                server_id
+            );
+            
+            // Post goodbye message if general channel exists
+            if (!channel_result.empty()) {
+                long long channel_id = channel_result[0]["id"].as<long long>();
+                std::string goodbye_msg = username + " has left " + server_name;
+                std::string system_sender = "System";
+                
+                txn.exec_params(
+                    "INSERT INTO messages (channel_id, sender, body) VALUES ($1, $2, $3)",
+                    channel_id, system_sender, goodbye_msg
+                );
+            }
+            
+            // Remove user from server_members
+            txn.exec_params(
+                "DELETE FROM server_members WHERE server_id = $1 AND username = $2",
+                server_id, username
+            );
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "Successfully left " + server_name;
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            nlohmann::json err_out;
+            err_out["error"] = e.what();
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            res.body() = err_out.dump();
+        }
     }
     
     // GET /api/servers/:id/members - Get server members (stub)
@@ -2405,15 +2638,479 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         res.body() = out.dump();
     }
     
-    // POST /api/channels/:id/mark-read - Mark channel as read (stub)
+    // POST /api/channels/:id/mark-read - Mark channel as read (update last_read_message_id)
     else if (path.rfind("/api/channels/", 0) == 0 && 
              path.find("/mark-read") != std::string::npos && 
              method == http::verb::post) {
-        nlohmann::json out;
-        out["status"] = "ok";
-        res.result(http::status::ok);
-        res.set(http::field::content_type, "application/json");
-        res.body() = out.dump();
+        try {
+            std::string username = authenticate_request(req);
+            
+            // Extract channel ID from path: /api/channels/{id}/mark-read
+            std::string path_copy = path;
+            size_t start = std::string("/api/channels/").length();
+            size_t end = path_copy.find("/mark-read");
+            std::string channel_id_str = path_copy.substr(start, end - start);
+            long long channel_id = std::stoll(channel_id_str);
+            
+            pqxx::connection db(PG_CONN);
+            pqxx::work txn(db);
+            
+            // Get the latest message ID in this channel
+            auto msg_result = txn.exec_params(
+                "SELECT COALESCE(MAX(id), 0) as latest_id FROM messages WHERE channel_id = $1",
+                channel_id
+            );
+            
+            long long latest_message_id = msg_result[0]["latest_id"].as<long long>();
+            
+            // Upsert into user_channel_reads
+            txn.exec_params(R"(
+                INSERT INTO user_channel_reads (username, channel_id, last_read_message_id, last_read_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (username, channel_id) 
+                DO UPDATE SET last_read_message_id = $3, last_read_at = NOW()
+            )", username, channel_id, latest_message_id);
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["channel_id"] = channel_id;
+            out["last_read_message_id"] = latest_message_id;
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            nlohmann::json err_out;
+            err_out["error"] = e.what();
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            res.body() = err_out.dump();
+        }
+    }
+    
+    // POST /api/dm/:id/mark-read - Mark DM as read (update last_read_message_id)
+    else if (path.rfind("/api/dm/", 0) == 0 && 
+             path.find("/mark-read") != std::string::npos && 
+             method == http::verb::post) {
+        try {
+            std::string username = authenticate_request(req);
+            
+            // Extract DM ID from path: /api/dm/{id}/mark-read
+            std::string path_copy = path;
+            size_t start = std::string("/api/dm/").length();
+            size_t end = path_copy.find("/mark-read");
+            std::string dm_id_str = path_copy.substr(start, end - start);
+            long long dm_id = std::stoll(dm_id_str);
+            
+            pqxx::connection db(PG_CONN);
+            UserInfo me = load_user_info(db, username);
+            
+            pqxx::work txn(db);
+            
+            // Verify user is part of this DM
+            auto dm_check = txn.exec_params(
+                "SELECT 1 FROM direct_conversations "
+                "WHERE dm_id = $1 AND (user1_id = $2 OR user2_id = $2)",
+                dm_id, me.id
+            );
+            
+            if (dm_check.empty()) {
+                throw std::runtime_error("not a member of this DM");
+            }
+            
+            // Get the latest message ID in this DM
+            auto msg_result = txn.exec_params(
+                "SELECT COALESCE(MAX(dm_message_id), 0) as latest_id "
+                "FROM direct_messages WHERE dm_id = $1 AND deleted_by_admin = FALSE",
+                dm_id
+            );
+            
+            long long latest_message_id = msg_result[0]["latest_id"].as<long long>();
+            
+            // Upsert into user_dm_reads
+            txn.exec_params(R"(
+                INSERT INTO user_dm_reads (user_id, dm_id, last_read_message_id, last_read_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (user_id, dm_id) 
+                DO UPDATE SET last_read_message_id = $3, last_read_at = NOW()
+            )", me.id, dm_id, latest_message_id);
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["dm_id"] = dm_id;
+            out["last_read_message_id"] = latest_message_id;
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            nlohmann::json err_out;
+            err_out["error"] = e.what();
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            res.body() = err_out.dump();
+        }
+    }
+
+
+    // =========================================================================
+    // FRIEND SYSTEM ENDPOINTS - Added 2025-12-19
+    // =========================================================================
+
+    // POST /api/friends/request - Send a friend request by username
+    else if (path == "/api/friends/request" && method == http::verb::post) {
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection db(PG_CONN);
+            
+            UserInfo user_info = load_user_info(db, username);
+            
+            auto body = nlohmann::json::parse(req.body());
+            std::string target_username = body.value("username", "");
+            
+            if (target_username.empty()) {
+                throw std::runtime_error("Username is required");
+            }
+            
+            if (target_username == username) {
+                throw std::runtime_error("Cannot add yourself as a friend");
+            }
+            
+            // Find target user
+            pqxx::work txn(db);
+            auto target_result = txn.exec_params(
+                "SELECT id FROM users WHERE username = $1",
+                target_username
+            );
+            
+            if (target_result.empty()) {
+                throw std::runtime_error("User not found");
+            }
+            
+            int64_t target_id = target_result[0]["id"].as<int64_t>();
+            
+            // Check if friendship already exists
+            auto existing = txn.exec_params(
+                "SELECT id, status FROM user_friends "
+                "WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)",
+                user_info.id, target_id
+            );
+            
+            if (!existing.empty()) {
+                std::string status = existing[0]["status"].as<std::string>();
+                if (status == "accepted") {
+                    throw std::runtime_error("Already friends with this user");
+                } else if (status == "pending") {
+                    throw std::runtime_error("Friend request already pending");
+                } else if (status == "blocked") {
+                    throw std::runtime_error("Cannot send friend request");
+                }
+            }
+            
+            // Create friend request
+            txn.exec_params(
+                "INSERT INTO user_friends (user_id, friend_id, status) VALUES ($1, $2, 'pending')",
+                user_info.id, target_id
+            );
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "Friend request sent";
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/friends/pending - Get pending friend requests received
+    else if (path == "/api/friends/pending" && method == http::verb::get) {
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection db(PG_CONN);
+            
+            UserInfo user_info = load_user_info(db, username);
+            
+            pqxx::work txn(db);
+            auto result = txn.exec_params(
+                "SELECT uf.id, u.username, uf.created_at "
+                "FROM user_friends uf "
+                "JOIN users u ON uf.user_id = u.id "
+                "WHERE uf.friend_id = $1 AND uf.status = 'pending' "
+                "ORDER BY uf.created_at DESC",
+                user_info.id
+            );
+            txn.commit();
+            
+            nlohmann::json out;
+            out["requests"] = nlohmann::json::array();
+            for (const auto& row : result) {
+                nlohmann::json req_obj;
+                req_obj["id"] = row["id"].as<int64_t>();
+                req_obj["username"] = row["username"].as<std::string>();
+                req_obj["created_at"] = row["created_at"].as<std::string>();
+                out["requests"].push_back(req_obj);
+            }
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::unauthorized);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/friends/sent - Get sent friend requests
+    else if (path == "/api/friends/sent" && method == http::verb::get) {
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection db(PG_CONN);
+            
+            UserInfo user_info = load_user_info(db, username);
+            
+            pqxx::work txn(db);
+            auto result = txn.exec_params(
+                "SELECT uf.id, u.username, uf.created_at "
+                "FROM user_friends uf "
+                "JOIN users u ON uf.friend_id = u.id "
+                "WHERE uf.user_id = $1 AND uf.status = 'pending' "
+                "ORDER BY uf.created_at DESC",
+                user_info.id
+            );
+            txn.commit();
+            
+            nlohmann::json out;
+            out["requests"] = nlohmann::json::array();
+            for (const auto& row : result) {
+                nlohmann::json req_obj;
+                req_obj["id"] = row["id"].as<int64_t>();
+                req_obj["username"] = row["username"].as<std::string>();
+                req_obj["created_at"] = row["created_at"].as<std::string>();
+                out["requests"].push_back(req_obj);
+            }
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::unauthorized);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // POST /api/friends/accept - Accept a friend request
+    else if (path == "/api/friends/accept" && method == http::verb::post) {
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection db(PG_CONN);
+            
+            UserInfo user_info = load_user_info(db, username);
+            
+            auto body = nlohmann::json::parse(req.body());
+            int64_t request_id = body.value("request_id", (int64_t)0);
+            std::string from_username = body.value("username", "");
+            
+            pqxx::work txn(db);
+            
+            pqxx::result result;
+            if (request_id > 0) {
+                result = txn.exec_params(
+                    "UPDATE user_friends SET status = 'accepted' "
+                    "WHERE id = $1 AND friend_id = $2 AND status = 'pending' "
+                    "RETURNING user_id",
+                    request_id, user_info.id
+                );
+            } else if (!from_username.empty()) {
+                result = txn.exec_params(
+                    "UPDATE user_friends SET status = 'accepted' "
+                    "WHERE friend_id = $1 AND status = 'pending' "
+                    "AND user_id = (SELECT id FROM users WHERE username = $2) "
+                    "RETURNING user_id",
+                    user_info.id, from_username
+                );
+            } else {
+                throw std::runtime_error("request_id or username required");
+            }
+            
+            if (result.empty()) {
+                throw std::runtime_error("Friend request not found");
+            }
+            
+            int64_t friend_user_id = result[0]["user_id"].as<int64_t>();
+            
+            // Create DM conversation if it doesn't exist
+            auto dm_check = txn.exec_params(
+                "SELECT dm_id FROM direct_conversations "
+                "WHERE (user1_id = $1 AND user2_id = $2) OR (user1_id = $2 AND user2_id = $1)",
+                user_info.id, friend_user_id
+            );
+            
+            if (dm_check.empty()) {
+                txn.exec_params(
+                    "INSERT INTO direct_conversations (user1_id, user2_id) VALUES ($1, $2)",
+                    user_info.id, friend_user_id
+                );
+            }
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "Friend request accepted";
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // POST /api/friends/reject - Reject/cancel a friend request
+    else if (path == "/api/friends/reject" && method == http::verb::post) {
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection db(PG_CONN);
+            
+            UserInfo user_info = load_user_info(db, username);
+            
+            auto body = nlohmann::json::parse(req.body());
+            int64_t request_id = body.value("request_id", (int64_t)0);
+            std::string from_username = body.value("username", "");
+            
+            pqxx::work txn(db);
+            
+            pqxx::result result;
+            if (request_id > 0) {
+                result = txn.exec_params(
+                    "DELETE FROM user_friends "
+                    "WHERE id = $1 AND (friend_id = $2 OR user_id = $2) AND status = 'pending' "
+                    "RETURNING id",
+                    request_id, user_info.id
+                );
+            } else if (!from_username.empty()) {
+                result = txn.exec_params(
+                    "DELETE FROM user_friends "
+                    "WHERE status = 'pending' "
+                    "AND ((friend_id = $1 AND user_id = (SELECT id FROM users WHERE username = $2)) "
+                    "  OR (user_id = $1 AND friend_id = (SELECT id FROM users WHERE username = $2))) "
+                    "RETURNING id",
+                    user_info.id, from_username
+                );
+            } else {
+                throw std::runtime_error("request_id or username required");
+            }
+            
+            if (result.empty()) {
+                throw std::runtime_error("Friend request not found");
+            }
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "Friend request rejected";
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/friends/list - Get list of accepted friends
+    else if (path == "/api/friends/list" && method == http::verb::get) {
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection db(PG_CONN);
+            
+            UserInfo user_info = load_user_info(db, username);
+            
+            std::vector<std::string> friends = get_accepted_friends(db, user_info.id);
+            
+            nlohmann::json out;
+            out["friends"] = friends;
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::unauthorized);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // POST /api/friends/remove - Remove a friend
+    else if (path == "/api/friends/remove" && method == http::verb::post) {
+        try {
+            std::string username = authenticate_request(req);
+            pqxx::connection db(PG_CONN);
+            
+            UserInfo user_info = load_user_info(db, username);
+            
+            auto body = nlohmann::json::parse(req.body());
+            std::string friend_username = body.value("username", "");
+            
+            if (friend_username.empty()) {
+                throw std::runtime_error("Username is required");
+            }
+            
+            pqxx::work txn(db);
+            
+            auto result = txn.exec_params(
+                "DELETE FROM user_friends "
+                "WHERE status = 'accepted' "
+                "AND ((user_id = $1 AND friend_id = (SELECT id FROM users WHERE username = $2)) "
+                "  OR (friend_id = $1 AND user_id = (SELECT id FROM users WHERE username = $2))) "
+                "RETURNING id",
+                user_info.id, friend_username
+            );
+            
+            if (result.empty()) {
+                throw std::runtime_error("Friend not found");
+            }
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message"] = "Friend removed";
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
     }
 
     else {
@@ -2428,14 +3125,94 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
 
 
 // ---------------------------------------------------------------------------
-// Session Dispatcher
+// JWT verification for WebSocket (extract from query string or cookie)
+// ---------------------------------------------------------------------------
+static std::string authenticate_websocket(const http::request<http::string_body>& req) {
+    std::string target = std::string(req.target());
+    std::string token;
+    
+    // Try to get token from query string: /ws?token=xxx
+    auto qpos = target.find('?');
+    if (qpos != std::string::npos) {
+        std::string query = target.substr(qpos + 1);
+        std::istringstream iss(query);
+        std::string kv;
+        while (std::getline(iss, kv, '&')) {
+            auto eq = kv.find('=');
+            if (eq != std::string::npos) {
+                std::string key = kv.substr(0, eq);
+                std::string val = kv.substr(eq + 1);
+                if (key == "token") {
+                    token = val;
+                    break;
+                }
+            }
+        }
+    }
+    
+    // Fallback to cookie
+    if (token.empty()) {
+        token = get_cookie(req, "BCORD_ACCESS");
+    }
+    
+    if (token.empty()) {
+        throw std::runtime_error("missing authentication token");
+    }
+    
+    if (!verify_jwt(token)) {
+        throw std::runtime_error("invalid or expired token");
+    }
+    
+    return decode_jwt_subject(token);
+}
+
+// ---------------------------------------------------------------------------
+// Session Dispatcher - handles both HTTP and WebSocket
 // ---------------------------------------------------------------------------
 static void do_session(tcp::socket socket) {
     try {
         beast::flat_buffer buffer;
         http::request<http::string_body> req;
         http::read(socket, buffer, req);
-        handle_request(req, socket);
+        
+        std::string target = std::string(req.target());
+        std::string path = target;
+        auto qpos = path.find('?');
+        if (qpos != std::string::npos) {
+            path = path.substr(0, qpos);
+        }
+        
+        // Check if this is a WebSocket upgrade request to /ws
+        if (path == "/ws" && websocket::is_upgrade(req)) {
+            log("[WS] WebSocket upgrade request received");
+            
+            try {
+                // Authenticate the WebSocket connection
+                std::string username = authenticate_websocket(req);
+                log("[WS] Authenticated user: " + username);
+                
+                // Create WebSocket session
+                auto session = std::make_shared<WebSocketSession>(std::move(socket));
+                
+                // Accept the WebSocket handshake
+                session->accept(req);
+                
+                // Run the session (this blocks until disconnection)
+                session->run(username);
+                
+            } catch (const std::exception& e) {
+                log(std::string("[WS] Auth failed: ") + e.what());
+                // Send HTTP 401 response
+                http::response<http::string_body> res{http::status::unauthorized, req.version()};
+                res.set(http::field::content_type, "application/json");
+                res.body() = R"({"error":")" + std::string(e.what()) + R"("})";
+                res.prepare_payload();
+                http::write(socket, res);
+            }
+        } else {
+            // Regular HTTP request
+            handle_request(req, socket);
+        }
     } catch (const std::exception &e) {
         log(std::string("[Session] Error: ") + e.what());
     }
