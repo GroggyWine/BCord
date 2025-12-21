@@ -6,6 +6,8 @@ import AdminPanel from "./AdminPanel";
 import { playInviteChime, playNewMessage, playServerJoined, playMessageSent, playUserOnline, playDoorbellDingDong, playServerClick, playChannelClick } from "../utils/sounds";
 import FriendsModal from "./FriendsModal";
 import { useWebSocket } from "../hooks/useWebSocket";
+import EmojiPicker from "./EmojiPicker";
+import ExpandableMessage from "./ExpandableMessage";
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -36,6 +38,8 @@ export default function ChatPage() {
   const [deleteChannelConfirm, setDeleteChannelConfirm] = useState(null);
   const [deleteServerConfirm, setDeleteServerConfirm] = useState(null);
   const [leaveServerConfirm, setLeaveServerConfirm] = useState(null);
+  const [serverContextMenu, setServerContextMenu] = useState({ visible: false, x: 0, y: 0, server: null });
+  const [renameServerModal, setRenameServerModal] = useState({ open: false, server: null });
   const [invitations, setInvitations] = useState([]);
   const [invitationsOpen, setInvitationsOpen] = useState(false);
   const [pendingFriendRequests, setPendingFriendRequests] = useState([]);
@@ -53,6 +57,9 @@ export default function ChatPage() {
   const [leftSectionWidth, setLeftSectionWidth] = useState(210);
   const [showFriendsModal, setShowFriendsModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState(null);
+  const [editingBody, setEditingBody] = useState("");
   
   const messagesEndRef = useRef(null);
   const resizingRef = useRef(null);
@@ -1037,6 +1044,70 @@ export default function ChatPage() {
     return () => clearInterval(interval);
   }, [currentUser, servers.length]);
 
+  // Handle emoji selection from picker
+  const handleEmojiSelect = (emoji) => {
+    setNewBody(prev => prev + emoji);
+    setShowEmojiPicker(false);
+    // Focus back on input
+    if (messageInputRef.current) {
+      messageInputRef.current.focus();
+    }
+  };
+
+  // Start editing a message
+  const startEditingMessage = (msg) => {
+    setEditingMessageId(msg.id);
+    setEditingBody(msg.body);
+    // Scroll edit form into view after render
+    setTimeout(() => {
+      const editForm = document.querySelector('.msg-edit-form');
+      if (editForm) {
+        editForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 50);
+  };
+
+  // Cancel editing
+  const cancelEditing = () => {
+    setEditingMessageId(null);
+    setEditingBody("");
+  };
+
+  // Save edited message
+  const saveEditedMessage = async () => {
+    if (!editingBody.trim() || !editingMessageId) return;
+    
+    const messageId = editingMessageId;
+    const newBody = editingBody.trim();
+    
+    // OPTIMISTIC UPDATE: Close edit, play sound, update UI immediately
+    const oldMessages = [...messages];
+    setMessages(prev => prev.map(msg => 
+      msg.id === messageId 
+        ? { ...msg, body: newBody, edited_at: new Date().toISOString() }
+        : msg
+    ));
+    cancelEditing();
+    playMessageSent();
+    if (messageInputRef.current) {
+      messageInputRef.current.focus();
+    }
+    
+    // Then make API call in background
+    try {
+      await axios.put("/api/messages/edit", {
+        message_id: messageId,
+        body: newBody
+      }, { withCredentials: true });
+    } catch (err) {
+      console.error("Failed to edit message:", err);
+      // Revert on error
+      setMessages(oldMessages);
+      alert("Failed to edit message: " + (err.response?.data?.error || err.message));
+    }
+  };
+
+
   async function sendMessage() {
     if (!newBody.trim() || !selectedServerId || !selectedChannel) return;
     try {
@@ -1267,6 +1338,32 @@ export default function ChatPage() {
       setLeaveServerConfirm(null);
     }
   }
+
+  // Rename server handler
+  async function handleRenameServer() {
+    if (!renameServerModal.server || !newServerName.trim()) return;
+    
+    try {
+      await axios.put(`/api/servers/${renameServerModal.server.id}/rename`, {
+        name: newServerName.trim()
+      }, { withCredentials: true });
+      
+      // Update server in list
+      setServers(prev => prev.map(s => 
+        s.id === renameServerModal.server.id 
+          ? { ...s, name: newServerName.trim(), initials: newServerName.trim().slice(0, 2).toUpperCase() }
+          : s
+      ));
+      
+      setRenameServerModal({ open: false, server: null });
+      setNewServerName("");
+      
+    } catch (err) {
+      console.error("Rename server error:", err);
+      alert("Failed to rename server: " + (err.response?.data?.error || err.message));
+    }
+  }
+
   // Channel management
   async function handleCreateChannel() {
     if (!newChannelName.trim() || !selectedServerId) return;
@@ -1561,11 +1658,12 @@ export default function ChatPage() {
                 onClick={() => handleSelectServer(server.id)}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  if (server.role === "owner") {
-                    setDeleteServerConfirm(server.id);
-                  } else {
-                    setLeaveServerConfirm(server.id);
-                  }
+                  setServerContextMenu({
+                    visible: true,
+                    x: e.clientX,
+                    y: e.clientY,
+                    server: server
+                  });
                 }}
                 title={`${server.name} (Right-click to ${server.role === 'owner' ? 'delete' : 'leave'})`}
               >
@@ -1725,8 +1823,39 @@ export default function ChatPage() {
                         <div className="bcord-chat-message-meta">
                           <span className="sender">{msg.sender}</span>
                           <span className="time">{formatTime(msg.created_at)}</span>
+                          {msg.edited_at && <span className="edited-indicator">(edited)</span>}
+                          {msg.sender === currentUser && editingMessageId !== msg.id && (
+                            <button 
+                              className="msg-edit-btn"
+                              onClick={() => startEditingMessage(msg)}
+                              title="Edit message"
+                            >
+                              ✏️
+                            </button>
+                          )}
                         </div>
-                        <div className="bcord-chat-message-text">{msg.body}</div>
+                        {editingMessageId === msg.id ? (
+                          <div className="msg-edit-form">
+                            <textarea
+                              className="msg-edit-textarea"
+                              value={editingBody}
+                              onChange={(e) => setEditingBody(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                  e.preventDefault();
+                                  saveEditedMessage();
+                                }
+                                if (e.key === 'Escape') {
+                                  cancelEditing();
+                                }
+                              }}
+                              autoFocus
+                            />
+                            <div className="msg-edit-hint-inline">press enter to save • escape to cancel</div>
+                          </div>
+                        ) : (
+                          <ExpandableMessage content={msg.body} />
+                        )}
                       </div>
                     </div>
                   </React.Fragment>
@@ -1735,18 +1864,33 @@ export default function ChatPage() {
               </div>
 
               <div className="bcord-chat-composer">
+                {/* Emoji Picker Popup */}
+                {showEmojiPicker && (
+                  <EmojiPicker 
+                    onSelect={handleEmojiSelect}
+                    onClose={() => setShowEmojiPicker(false)}
+                  />
+                )}
+                
+                {/* Emoji Toggle Button */}
+                <button 
+                  className="emoji-toggle-btn"
+                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                  title="Add emoji"
+                >
+                  😀
+                </button>
+                
                 <textarea
                   ref={messageInputRef}
                   className="bcord-chat-input"
                   value={newBody}
                   onChange={(e) => {
                     const value = e.target.value;
-                    if (value.length <= 500) {
-                      setNewBody(value);
-                      // Auto-resize
-                      e.target.style.height = 'auto';
-                      e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
-                    }
+                    setNewBody(value);
+                    // Auto-resize
+                    e.target.style.height = 'auto';
+                    e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
@@ -1758,7 +1902,7 @@ export default function ChatPage() {
                   }}
                   placeholder={`Message #${selectedChannel}`}
                   rows={1}
-                  maxLength={500}
+                  
                 />
                 {newBody.length > 400 && (
                   <span style={{
@@ -1768,7 +1912,7 @@ export default function ChatPage() {
                     fontSize: '11px',
                     color: newBody.length >= 500 ? '#ef4444' : '#9ca3af'
                   }}>
-                    {newBody.length}/500
+                    {newBody.length > 10000 ? '10000+ chars' : newBody.length + ' chars'}
                   </span>
                 )}
                 <button className="bcord-chat-send-btn" onClick={sendMessage}>
@@ -2022,6 +2166,138 @@ export default function ChatPage() {
                 }}
               >
                 Delete Channel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Server Context Menu */}
+      {serverContextMenu.visible && (
+        <>
+          {/* Invisible overlay to catch clicks outside */}
+          <div 
+            className="context-menu-overlay"
+            style={{
+              position: 'fixed',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 9999
+            }}
+            onClick={() => setServerContextMenu({ visible: false, x: 0, y: 0, server: null })}
+          />
+          <div 
+            className="server-context-menu"
+            style={{ 
+              position: 'fixed', 
+              top: serverContextMenu.y, 
+              left: serverContextMenu.x,
+              zIndex: 10000
+            }}
+          >
+          {serverContextMenu.server?.role === "owner" && (
+            <>
+              <button 
+                className="context-menu-item"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setNewServerName(serverContextMenu.server.name);
+                  setRenameServerModal({ open: true, server: serverContextMenu.server });
+                  setServerContextMenu({ visible: false, x: 0, y: 0, server: null });
+                }}
+              >
+                ✏️ Rename Server
+              </button>
+              <button 
+                className="context-menu-item danger"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteServerConfirm(serverContextMenu.server.id);
+                  setServerContextMenu({ visible: false, x: 0, y: 0, server: null });
+                }}
+              >
+                🗑️ Delete Server
+              </button>
+            </>
+          )}
+          {serverContextMenu.server?.role !== "owner" && (
+            <button 
+              className="context-menu-item danger"
+              onClick={(e) => {
+                e.stopPropagation();
+                setLeaveServerConfirm(serverContextMenu.server.id);
+                setServerContextMenu({ visible: false, x: 0, y: 0, server: null });
+              }}
+            >
+              🚪 Leave Server
+            </button>
+          )}
+        </div>
+        </>
+      )}
+
+      {/* Rename Server Modal */}
+      {renameServerModal.open && (
+        <div className="profile-menu-overlay" onClick={() => { setRenameServerModal({ open: false, server: null }); setNewServerName(""); }}>
+          <div className="session-warning-modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Rename Server</h2>
+            <p>Enter a new name for {renameServerModal.server?.name}</p>
+            <input
+              type="text"
+              value={newServerName}
+              onChange={(e) => setNewServerName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleRenameServer();
+                if (e.key === 'Escape') { setRenameServerModal({ open: false, server: null }); setNewServerName(""); }
+              }}
+              placeholder="Server name"
+              autoFocus
+              style={{
+                width: '100%',
+                padding: '12px',
+                marginTop: '16px',
+                background: '#1e1f22',
+                border: '1px solid #3f4147',
+                borderRadius: '8px',
+                color: '#dbdee1',
+                fontSize: '14px',
+                outline: 'none'
+              }}
+            />
+            <div style={{ display: 'flex', gap: '12px', marginTop: '20px' }}>
+              <button 
+                onClick={() => { setRenameServerModal({ open: false, server: null }); setNewServerName(""); }}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  background: 'transparent',
+                  border: '1px solid #475569',
+                  borderRadius: '8px',
+                  color: '#e5e7eb',
+                  cursor: 'pointer',
+                  fontSize: '14px'
+                }}
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleRenameServer}
+                disabled={!newServerName.trim()}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  background: newServerName.trim() ? '#5865f2' : '#4f545c',
+                  border: 'none',
+                  borderRadius: '8px',
+                  color: '#fff',
+                  cursor: newServerName.trim() ? 'pointer' : 'not-allowed',
+                  fontSize: '14px',
+                  fontWeight: '600'
+                }}
+              >
+                Rename
               </button>
             </div>
           </div>

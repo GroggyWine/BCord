@@ -6,6 +6,8 @@ import { playDoorbellDingDong, playMessageSent, playChannelClick, playInviteChim
 
 import FriendsModal from "./FriendsModal";
 import { useWebSocket } from "../hooks/useWebSocket";
+import EmojiPicker from "./EmojiPicker";
+import ExpandableMessage from "./ExpandableMessage";
 export default function DmPage() {
   const { dmId } = useParams();
   const navigate = useNavigate();
@@ -50,7 +52,10 @@ export default function DmPage() {
   const [draggingDm, setDraggingDm] = useState(null);
   const [dragOverDm, setDragOverDm] = useState(null);
   const [dragSection, setDragSection] = useState(null); // "pinned" or "normal"
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   
+  const [editingMessageId, setEditingMessageId] = useState(null);
+  const [editingBody, setEditingBody] = useState("");
   const messagesEndRef = useRef(null);
   const prevMessageCountRef = useRef(0);
   const messageInputRef = useRef(null);
@@ -509,6 +514,73 @@ export default function DmPage() {
       alert(err.response?.data?.error || "Failed to reject friend request");
     }
   }
+
+  // Handle emoji selection from picker
+  const handleEmojiSelect = (emoji) => {
+    setNewBody(prev => prev + emoji);
+    setShowEmojiPicker(false);
+    if (messageInputRef.current) {
+      messageInputRef.current.focus();
+    }
+  };
+
+
+  // =========================================================================
+  // MESSAGE EDITING HANDLERS
+  // =========================================================================
+  
+  // Start editing a message
+  const startEditingMessage = (msg) => {
+    setEditingMessageId(msg.dm_message_id);
+    setEditingBody(msg.content);
+    // Scroll edit form into view after render
+    setTimeout(() => {
+      const editForm = document.querySelector('.msg-edit-form');
+      if (editForm) {
+        editForm.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 50);
+  };
+
+  // Cancel editing
+  const cancelEditing = () => {
+    setEditingMessageId(null);
+    setEditingBody("");
+  };
+
+  // Save edited message
+  const saveEditedMessage = async () => {
+    if (!editingBody.trim() || !editingMessageId) return;
+    
+    const messageId = editingMessageId;
+    const newContent = editingBody.trim();
+    
+    // OPTIMISTIC UPDATE: Close edit, play sound, update UI immediately
+    const oldMessages = [...messages];
+    setMessages(prev => prev.map(msg => 
+      msg.dm_message_id === messageId 
+        ? { ...msg, content: newContent, edited_at: new Date().toISOString() }
+        : msg
+    ));
+    cancelEditing();
+    playMessageSent();
+    if (messageInputRef.current) {
+      messageInputRef.current.focus();
+    }
+    
+    // Then make API call in background
+    try {
+      await axios.put("/api/dm/edit", {
+        dm_message_id: messageId,
+        content: newContent
+      }, { withCredentials: true });
+    } catch (err) {
+      console.error("Failed to edit message:", err);
+      // Revert on error
+      setMessages(oldMessages);
+      alert(err.response?.data?.error || "Failed to edit message");
+    }
+  };
 
   const sendMessage = async () => {
     if (!selectedDmId || !newBody.trim() || sending) return;
@@ -1227,8 +1299,39 @@ export default function DmPage() {
                       <div className="bcord-chat-message-meta">
                         <span className="sender">{msg.sender_username}</span>
                         <span className="time">{formatTime(msg.created_at)}</span>
+                        {msg.edited_at && <span className="edited-indicator">(edited)</span>}
+                        {msg.sender_username === currentUser && editingMessageId !== msg.dm_message_id && (
+                          <button 
+                            className="msg-edit-btn"
+                            onClick={() => startEditingMessage(msg)}
+                            title="Edit message"
+                          >
+                            ✏️
+                          </button>
+                        )}
                       </div>
-                      <div className="bcord-chat-message-text">{msg.content}</div>
+                      {editingMessageId === msg.dm_message_id ? (
+                        <div className="msg-edit-form">
+                          <textarea
+                            className="msg-edit-textarea"
+                            value={editingBody}
+                            onChange={(e) => setEditingBody(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                saveEditedMessage();
+                              }
+                              if (e.key === 'Escape') {
+                                cancelEditing();
+                              }
+                            }}
+                            autoFocus
+                          />
+                          <div className="msg-edit-hint-inline">press enter to save • escape to cancel</div>
+                        </div>
+                      ) : (
+                        <ExpandableMessage content={msg.content} />
+                      )}
                     </div>
                   </div>
                 </React.Fragment>
@@ -1239,16 +1342,31 @@ export default function DmPage() {
 
           {selectedDmId && (
             <div className="bcord-chat-composer">
+              {/* Emoji Picker Popup */}
+              {showEmojiPicker && (
+                <EmojiPicker 
+                  onSelect={handleEmojiSelect}
+                  onClose={() => setShowEmojiPicker(false)}
+                />
+              )}
+              
+              {/* Emoji Toggle Button */}
+              <button 
+                className="emoji-toggle-btn"
+                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                title="Add emoji"
+              >
+                😀
+              </button>
+              
               <textarea
                 ref={messageInputRef}
                 className="bcord-chat-input"
                 value={newBody}
                 onChange={(e) => {
-                  if (e.target.value.length <= 500) {
-                    setNewBody(e.target.value);
-                    e.target.style.height = 'auto';
-                    e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
-                  }
+                  setNewBody(e.target.value);
+                  e.target.style.height = 'auto';
+                  e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
@@ -1259,7 +1377,7 @@ export default function DmPage() {
                 }}
                 placeholder={`Message @${otherUsername}`}
                 rows={1}
-                maxLength={500}
+                
               />
               <button className="bcord-chat-send-btn" onClick={sendMessage} disabled={sending || !newBody.trim()}>
                 {sending ? "..." : "Send"}

@@ -710,6 +710,58 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         res.set(http::field::content_type, "application/json");
         res.body() = R"({"status":"healthy"})";
     }
+    // =========================================================================
+    // AUTO-PURGE: Delete messages older than 30 days
+    // Called by cron job: curl -X POST http://localhost:9000/api/purge-old-messages
+    // =========================================================================
+    else if (target == "/api/purge-old-messages" && method == http::verb::post) {
+        try {
+            pqxx::connection db(PG_CONN);
+            pqxx::work txn{db};
+            
+            const std::string deleted_msg = "[Message deleted after 30 days]";
+            
+            // Purge old channel messages (replace body, keep record)
+            auto channel_result = txn.exec_params(
+                "UPDATE messages SET body = $1, edited_at = NOW() "
+                "WHERE created_at < NOW() - INTERVAL '30 days' "
+                "AND body != $1 "
+                "RETURNING id",
+                deleted_msg
+            );
+            int64_t channel_purged = channel_result.size();
+            
+            // Purge old DM messages (replace content, keep record)
+            auto dm_result = txn.exec_params(
+                "UPDATE direct_messages SET content = $1, edited_at = NOW() "
+                "WHERE created_at < NOW() - INTERVAL '30 days' "
+                "AND content != $1 "
+                "RETURNING dm_message_id",
+                deleted_msg
+            );
+            int64_t dm_purged = dm_result.size();
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["success"] = true;
+            out["channel_messages_purged"] = channel_purged;
+            out["dm_messages_purged"] = dm_purged;
+            out["message"] = "Purged messages older than 30 days";
+            
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+            std::cout << "[PURGE] Purged " << channel_purged << " channel messages and " 
+                      << dm_purged << " DM messages older than 30 days" << std::endl;
+        } catch (const std::exception& e) {
+            res.result(http::status::internal_server_error);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
     else if ((target == "/metrics") && method == http::verb::get) {
         // ✅ Use Metrics singleton to generate Prometheus text format
         res.set(http::field::content_type, "text/plain; version=0.0.4");
@@ -1172,7 +1224,7 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
             }
 
             auto rows = txn.exec_params(
-                "SELECT m.id, m.sender, m.body, m.created_at "
+                "SELECT m.id, m.sender, m.body, m.created_at, m.edited_at "
                 "FROM messages m "
                 "JOIN channels ch ON m.channel_id = ch.id "
                 "WHERE ch.server_id = $1 AND ch.name = $2 "
@@ -1190,6 +1242,9 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
                 msg["sender"] = std::string(row["sender"].c_str());
                 msg["body"] = std::string(row["body"].c_str());
                 msg["created_at"] = std::string(row["created_at"].c_str());
+                msg["edited_at"] = row["edited_at"].is_null() 
+                    ? nullptr 
+                    : nlohmann::json(std::string(row["edited_at"].c_str()));
                 arr.push_back(std::move(msg));
             }
 
@@ -2382,6 +2437,73 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         }
     }
     
+    // PUT /api/servers/:id/rename - Rename a server
+    else if (path.rfind("/api/servers/", 0) == 0 && 
+             path.find("/rename") != std::string::npos &&
+             method == http::verb::put) {
+        try {
+            std::string current_username = authenticate_request(req);
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            
+            if (!j.contains("name")) {
+                throw std::runtime_error("name is required");
+            }
+            
+            std::string new_name = j["name"].get<std::string>();
+            if (new_name.empty() || new_name.length() > 100) {
+                throw std::runtime_error("name must be 1-100 characters");
+            }
+            
+            // Extract server_id from path: /api/servers/123/rename
+            std::string prefix = "/api/servers/";
+            size_t start = prefix.length();
+            size_t end = path.find("/rename");
+            std::string server_id_str = path.substr(start, end - start);
+            int64_t server_id = std::stoll(server_id_str);
+            
+            pqxx::connection db(PG_CONN);
+            pqxx::work txn(db);
+            
+            // Verify user is the server owner
+            auto owner_check = txn.exec_params(
+                "SELECT owner_username FROM servers WHERE id = $1",
+                server_id
+            );
+            
+            if (owner_check.empty()) {
+                throw std::runtime_error("server not found");
+            }
+            
+            std::string owner = owner_check[0]["owner_username"].c_str();
+            if (owner != current_username) {
+                throw std::runtime_error("only the server owner can rename the server");
+            }
+            
+            // Update server name
+            txn.exec_params(
+                "UPDATE servers SET name = $1 WHERE id = $2",
+                new_name, server_id
+            );
+            
+            txn.commit();
+            
+            nlohmann::json out;
+            out["success"] = true;
+            out["name"] = new_name;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+            
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
     // DELETE /api/servers/:id - Delete a server
     else if (path.rfind("/api/servers/", 0) == 0 && 
              path.find("/channels") == std::string::npos &&
@@ -3106,6 +3228,327 @@ static void handle_request(http::request<http::string_body> &req, Stream &stream
         }
     }
 
+
+
+    // =========================================================================
+    // MESSAGE EDIT ENDPOINTS
+    // =========================================================================
+    
+    // PUT /api/messages/edit - Edit a server channel message
+    else if (path == "/api/messages/edit" && method == http::verb::put) {
+        try {
+            std::string username = authenticate_request(req);
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            
+            if (!j.contains("message_id") || !j.contains("body")) {
+                throw std::runtime_error("message_id and body are required");
+            }
+            
+            int64_t message_id = j["message_id"].get<int64_t>();
+            std::string new_body = j["body"].get<std::string>();
+            
+            if (new_body.empty() || new_body.length() > 50000) {
+                throw std::runtime_error("body must be 1-50000 characters");
+            }
+            
+            pqxx::connection db(PG_CONN);
+            pqxx::work txn(db);
+            
+            // Get the original message and verify ownership
+            auto msg = txn.exec_params(
+                "SELECT id, channel_id, sender, body FROM messages WHERE id = $1",
+                message_id
+            );
+            
+            if (msg.empty()) {
+                throw std::runtime_error("message not found");
+            }
+            
+            std::string original_sender = msg[0]["sender"].as<std::string>();
+            std::string original_body = msg[0]["body"].as<std::string>();
+            int64_t channel_id = msg[0]["channel_id"].as<int64_t>();
+            
+            if (original_sender != username) {
+                throw std::runtime_error("you can only edit your own messages");
+            }
+            
+            // Store the previous version in edit history
+            txn.exec_params(
+                "INSERT INTO message_edits (message_id, previous_body, edited_by) "
+                "VALUES ($1, $2, $3)",
+                message_id, original_body, username
+            );
+            
+            // Update the message
+            auto updated = txn.exec_params(
+                "UPDATE messages SET body = $1, edited_at = NOW() "
+                "WHERE id = $2 RETURNING edited_at::text",
+                new_body, message_id
+            );
+            
+            std::string edited_at = updated[0]["edited_at"].as<std::string>();
+            
+            // Get server_id and channel name for WebSocket broadcast
+            auto ch = txn.exec_params(
+                "SELECT c.server_id, c.name FROM channels c WHERE c.id = $1",
+                channel_id
+            );
+            int64_t server_id = ch[0]["server_id"].as<int64_t>();
+            std::string channel_name = ch[0]["name"].as<std::string>();
+            
+            txn.commit();
+            
+            // Broadcast edit via WebSocket
+            nlohmann::json ws_event;
+            ws_event["type"] = "message_edited";
+            ws_event["server_id"] = server_id;
+            ws_event["channel"] = channel_name;
+            ws_event["channel_id"] = channel_id;
+            ws_event["message"] = {
+                {"id", message_id},
+                {"body", new_body},
+                {"edited_at", edited_at}
+            };
+            WebSocketManager::instance().send_to_server(server_id, ws_event);
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message_id"] = message_id;
+            out["body"] = new_body;
+            out["edited_at"] = edited_at;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // PUT /api/dm/edit - Edit a direct message
+    else if (path == "/api/dm/edit" && method == http::verb::put) {
+        try {
+            std::string username = authenticate_request(req);
+            auto j = nlohmann::json::parse(req.body(), nullptr, true);
+            
+            if (!j.contains("dm_message_id") || !j.contains("content")) {
+                throw std::runtime_error("dm_message_id and content are required");
+            }
+            
+            int64_t dm_message_id = j["dm_message_id"].get<int64_t>();
+            std::string new_content = j["content"].get<std::string>();
+            
+            if (new_content.empty() || new_content.length() > 50000) {
+                throw std::runtime_error("content must be 1-50000 characters");
+            }
+            
+            pqxx::connection db(PG_CONN);
+            UserInfo me = load_user_info(db, username);
+            
+            pqxx::work txn(db);
+            
+            // Get the original message and verify ownership
+            auto msg = txn.exec_params(
+                "SELECT dm_message_id, dm_id, sender_id, content FROM direct_messages "
+                "WHERE dm_message_id = $1",
+                dm_message_id
+            );
+            
+            if (msg.empty()) {
+                throw std::runtime_error("message not found");
+            }
+            
+            int64_t sender_id = msg[0]["sender_id"].as<int64_t>();
+            std::string original_content = msg[0]["content"].as<std::string>();
+            int64_t dm_id = msg[0]["dm_id"].as<int64_t>();
+            
+            if (sender_id != me.id) {
+                throw std::runtime_error("you can only edit your own messages");
+            }
+            
+            // Store the previous version in edit history
+            txn.exec_params(
+                "INSERT INTO dm_message_edits (dm_message_id, previous_content, edited_by_id) "
+                "VALUES ($1, $2, $3)",
+                dm_message_id, original_content, me.id
+            );
+            
+            // Update the message
+            auto updated = txn.exec_params(
+                "UPDATE direct_messages SET content = $1, edited_at = NOW() "
+                "WHERE dm_message_id = $2 RETURNING edited_at::text",
+                new_content, dm_message_id
+            );
+            
+            std::string edited_at = updated[0]["edited_at"].as<std::string>();
+            
+            // Get the other user for WebSocket broadcast
+            auto dm_info = txn.exec_params(
+                "SELECT user1_id, user2_id FROM direct_conversations WHERE dm_id = $1",
+                dm_id
+            );
+            int64_t other_id = (dm_info[0]["user1_id"].as<int64_t>() == me.id)
+                ? dm_info[0]["user2_id"].as<int64_t>()
+                : dm_info[0]["user1_id"].as<int64_t>();
+            
+            auto other_user = txn.exec_params(
+                "SELECT username FROM users WHERE id = $1", other_id
+            );
+            std::string other_username = other_user[0]["username"].as<std::string>();
+            
+            txn.commit();
+            
+            // Broadcast edit via WebSocket to both users
+            nlohmann::json ws_event;
+            ws_event["type"] = "dm_edited";
+            ws_event["dm_id"] = dm_id;
+            ws_event["message"] = {
+                {"dm_message_id", dm_message_id},
+                {"content", new_content},
+                {"edited_at", edited_at}
+            };
+            WebSocketManager::instance().send_to_user(username, ws_event);
+            WebSocketManager::instance().send_to_user(other_username, ws_event);
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["dm_message_id"] = dm_message_id;
+            out["content"] = new_content;
+            out["edited_at"] = edited_at;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/messages/history - Get edit history for a message
+    else if (path == "/api/messages/history" && method == http::verb::get) {
+        try {
+            std::string username = authenticate_request(req);
+            
+            // Parse message_id from query string
+            std::string qs = std::string(req.target());
+            size_t qpos = qs.find('?');
+            int64_t message_id = 0;
+            if (qpos != std::string::npos) {
+                std::string params = qs.substr(qpos + 1);
+                size_t mid_pos = params.find("message_id=");
+                if (mid_pos != std::string::npos) {
+                    message_id = std::stoll(params.substr(mid_pos + 11));
+                }
+            }
+            
+            if (message_id == 0) {
+                throw std::runtime_error("message_id is required");
+            }
+            
+            pqxx::connection db(PG_CONN);
+            pqxx::read_transaction txn(db);
+            
+            auto edits = txn.exec_params(
+                "SELECT edit_id, previous_body, edited_at::text, edited_by "
+                "FROM message_edits WHERE message_id = $1 "
+                "ORDER BY edited_at DESC",
+                message_id
+            );
+            
+            nlohmann::json history = nlohmann::json::array();
+            for (const auto& row : edits) {
+                history.push_back({
+                    {"edit_id", row["edit_id"].as<int64_t>()},
+                    {"previous_body", row["previous_body"].as<std::string>()},
+                    {"edited_at", row["edited_at"].as<std::string>()},
+                    {"edited_by", row["edited_by"].as<std::string>()}
+                });
+            }
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["message_id"] = message_id;
+            out["history"] = history;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
+    
+    // GET /api/dm/history - Get edit history for a DM message
+    else if (path == "/api/dm/history" && method == http::verb::get) {
+        try {
+            std::string username = authenticate_request(req);
+            
+            // Parse dm_message_id from query string
+            std::string qs = std::string(req.target());
+            size_t qpos = qs.find('?');
+            int64_t dm_message_id = 0;
+            if (qpos != std::string::npos) {
+                std::string params = qs.substr(qpos + 1);
+                size_t mid_pos = params.find("dm_message_id=");
+                if (mid_pos != std::string::npos) {
+                    dm_message_id = std::stoll(params.substr(mid_pos + 14));
+                }
+            }
+            
+            if (dm_message_id == 0) {
+                throw std::runtime_error("dm_message_id is required");
+            }
+            
+            pqxx::connection db(PG_CONN);
+            pqxx::read_transaction txn(db);
+            
+            auto edits = txn.exec_params(
+                "SELECT e.edit_id, e.previous_content, e.edited_at::text, u.username as edited_by "
+                "FROM dm_message_edits e "
+                "JOIN users u ON e.edited_by_id = u.id "
+                "WHERE e.dm_message_id = $1 "
+                "ORDER BY e.edited_at DESC",
+                dm_message_id
+            );
+            
+            nlohmann::json history = nlohmann::json::array();
+            for (const auto& row : edits) {
+                history.push_back({
+                    {"edit_id", row["edit_id"].as<int64_t>()},
+                    {"previous_content", row["previous_content"].as<std::string>()},
+                    {"edited_at", row["edited_at"].as<std::string>()},
+                    {"edited_by", row["edited_by"].as<std::string>()}
+                });
+            }
+            
+            nlohmann::json out;
+            out["status"] = "ok";
+            out["dm_message_id"] = dm_message_id;
+            out["history"] = history;
+            
+            res.result(http::status::ok);
+            res.set(http::field::content_type, "application/json");
+            res.body() = out.dump();
+        } catch (const std::exception& e) {
+            res.result(http::status::bad_request);
+            res.set(http::field::content_type, "application/json");
+            nlohmann::json err;
+            err["error"] = e.what();
+            res.body() = err.dump();
+        }
+    }
 
 
     // =========================================================================

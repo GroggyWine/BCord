@@ -669,7 +669,7 @@ button {
 }
 
 .bcord-chat-message-body .text {
-  font-size: 13px;
+  font-size: 18px;
   line-height: 1.4;
   word-wrap: break-word;
   overflow-wrap: anywhere;
@@ -1976,7 +1976,7 @@ button {
 
 .bcord-chat-message-text {
   white-space: pre-wrap;
-  font-size: 13px;
+  font-size: 18px;
   line-height: 1.4;
   word-wrap: break-word;
   overflow-wrap: anywhere;
@@ -2922,7 +2922,7 @@ button {
   }
   
   .bcord-chat-message-text {
-    font-size: 14px;
+    font-size: 18px;
   }
   
   .bcord-chat-message-time {
@@ -3181,4 +3181,374 @@ button {
 
 .bcord-chat-room-item[draggable="true"]:active {
   cursor: grabbing;
+}
+
+/* ============================================
+   EXPANDABLE LONG MESSAGE STYLES
+   ============================================ */
+
+.expandable-message {
+  position: relative;
+}
+
+.message-preview {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.expand-message-btn {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 10px;
+  background: #3f4147;
+  border: none;
+  border-radius: 4px;
+  color: #00b0f4;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.expand-message-btn:hover {
+  background: #5865f2;
+  color: #fff;
+}
+
+/* Modal overlay */
+.message-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+/* Modal container */
+.message-modal {
+  position: relative;
+  width: 90%;
+  max-width: 800px;
+  max-height: 80vh;
+  background: #2b2d31;
+  border: 1px solid #3f4147;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Close button */
+.message-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  background: #3f4147;
+  border: none;
+  border-radius: 50%;
+  color: #dbdee1;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  z-index: 1;
+}
+
+.message-modal-close:hover {
+  background: #ed4245;
+  color: #fff;
+}
+
+/* Scrollable content */
+.message-modal-content {
+  padding: 20px;
+  padding-top: 50px;
+  overflow-y: auto;
+  color: #dbdee1;
+  font-size: 18px;
+  line-height: 1.5;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Custom scrollbar for modal */
+.message-modal-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.message-modal-content::-webkit-scrollbar-track {
+  background: #1e1f22;
+  border-radius: 4px;
+}
+
+.message-modal-content::-webkit-scrollbar-thumb {
+  background: #4f545c;
+  border-radius: 4px;
+}
+
+.message-modal-content::-webkit-scrollbar-thumb:hover {
+  background: #5d6269;
+}
+
+/* Message content base style */
+.message-content {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Inline edit hint (no buttons) */
+.msg-edit-hint-inline {
+  font-size: 11px;
+  color: #72767d;
+  margin-top: 4px;
+  font-style: italic;
+}
+
+/* ============================================
+   EMOJI SIZE INCREASE (25% larger)
+   ============================================ */
+
+/* Emojis in message text - 25% larger than surrounding text */
+.bcord-chat-message-text,
+.message-content,
+.message-preview,
+.message-modal-content {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Color Emoji", "Segoe UI Emoji", sans-serif;
+}
+
+/* Target emoji characters specifically */
+.bcord-chat-message-text,
+.message-content,
+.message-preview,
+.message-modal-content,
+.msg-edit-textarea {
+  /* This makes emojis render 25% larger */
+  -webkit-font-feature-settings: "liga" 1;
+  font-feature-settings: "liga" 1;
+}
+
+/* Emoji sizing using ::after pseudo elements won't work, so we use a different approach */
+/* Wrap approach - emojis appear larger due to line-height and font sizing */
+.bcord-chat-message-text span.emoji,
+.message-content span.emoji {
+  font-size: 1.25em;
+}
+
+/* For inline emojis without wrapper, increase line height to accommodate */
+.bcord-chat-message-text,
+.message-content {
+  line-height: 1.6;
+}
+
+/* Emoji spans - 25% larger than text (18px * 1.25 = 22.5px) */
+.emoji {
+  font-size: 1.25em;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+/* ============================================
+   EMOJI TOGGLE BUTTON - Uniform with Message Box
+   ============================================ */
+
+.emoji-toggle-btn {
+  min-width: 44px;
+  min-height: 40px;
+  padding: 8px 10px;
+  background: #020617;
+  border-radius: 8px;
+  border: 1px solid rgba(30, 64, 175, 0.5);
+  color: var(--bcord-text);
+  font-size: 22px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.2s, background 0.2s;
+  flex-shrink: 0;
+}
+
+.emoji-toggle-btn:hover {
+  border-color: rgba(30, 64, 175, 0.8);
+  background: #0f172a;
+}
+
+.emoji-toggle-btn:active {
+  background: #1e293b;
+}
+
+/* ============================================
+   EMOJI PICKER - Tall & Narrow (15 icons across)
+   ============================================ */
+
+.emoji-picker {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 8px;
+  width: 480px;
+  max-height: 400px;
+  background: #1e1f22;
+  border: 1px solid #3f4147;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  z-index: 1000;
+  overflow: hidden;
+}
+
+.emoji-picker-header {
+  padding: 10px;
+  border-bottom: 1px solid #3f4147;
+  flex-shrink: 0;
+}
+
+.emoji-search {
+  width: 100%;
+  padding: 8px 12px;
+  background: #383a40;
+  border: 1px solid #4f545c;
+  border-radius: 4px;
+  color: #dbdee1;
+  font-size: 14px;
+  outline: none;
+}
+
+.emoji-search:focus {
+  border-color: #5865f2;
+}
+
+.emoji-search::placeholder {
+  color: #72767d;
+}
+
+.emoji-categories {
+  display: flex;
+  gap: 2px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #3f4147;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.emoji-categories::-webkit-scrollbar {
+  height: 4px;
+}
+
+.emoji-categories::-webkit-scrollbar-thumb {
+  background: #4f545c;
+  border-radius: 2px;
+}
+
+.emoji-category-btn {
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  font-size: 18px;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.emoji-category-btn:hover {
+  background: #3f4147;
+}
+
+.emoji-category-btn.active {
+  background: #5865f2;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(15, 1fr);
+  gap: 2px;
+  padding: 10px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.emoji-grid::-webkit-scrollbar {
+  width: 8px;
+}
+
+.emoji-grid::-webkit-scrollbar-track {
+  background: #1e1f22;
+  border-radius: 4px;
+}
+
+.emoji-grid::-webkit-scrollbar-thumb {
+  background: #4f545c;
+  border-radius: 4px;
+}
+
+.emoji-grid::-webkit-scrollbar-thumb:hover {
+  background: #5d6269;
+}
+
+.emoji-btn {
+  width: 100%;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  font-size: 20px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.emoji-btn:hover {
+  background: #3f4147;
+  transform: scale(1.15);
+}
+
+/* ============================================
+   SERVER CONTEXT MENU
+   ============================================ */
+
+.server-context-menu {
+  background: #111214;
+  border: 1px solid #2b2d31;
+  border-radius: 6px;
+  padding: 6px;
+  min-width: 160px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.server-context-menu .context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: #dbdee1;
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.server-context-menu .context-menu-item:hover {
+  background: #5865f2;
+  color: #fff;
+}
+
+.server-context-menu .context-menu-item.danger:hover {
+  background: #ed4245;
 }
