@@ -42,6 +42,7 @@ export default function DmPage() {
   const [invitationsOpen, setInvitationsOpen] = useState(false);
   const [pendingFriendRequests, setPendingFriendRequests] = useState([]);
   const [users, setUsers] = useState([]);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   
   const messagesEndRef = useRef(null);
   const prevMessageCountRef = useRef(0);
@@ -481,6 +482,7 @@ export default function DmPage() {
     setMessages([]);
     prevMessageCountRef.current = 0;
     navigate(`/dm/${dm.dm_id}`, { replace: true });
+    setMobileMenuOpen(false); // Close mobile menu after selection
     
     // Mark DM as read
     try {
@@ -501,6 +503,7 @@ export default function DmPage() {
 
   const handleSelectServer = (serverId) => {
     playLeaveDm();
+    setMobileMenuOpen(false); // Close mobile menu
     navigate("/chat");
   };
 
@@ -620,6 +623,23 @@ export default function DmPage() {
 
   return (
     <div className="bcord-chat-root">
+      {/* Mobile Menu Toggle */}
+      <button 
+        className="mobile-menu-toggle"
+        onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+        aria-label="Toggle menu"
+      >
+        {mobileMenuOpen ? '✕' : '☰'}
+      </button>
+      
+      {/* Mobile Overlay */}
+      {mobileMenuOpen && (
+        <div 
+          className="mobile-overlay active"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
       {/* TOP BAR */}
       <div className="bcord-chat-topbar">
         <div className="bcord-chat-topbar-left">
@@ -747,7 +767,7 @@ export default function DmPage() {
         }}
       >
         {/* LEFT SECTION */}
-        <div className="bcord-left-section" style={{ width: `${leftSectionWidth}px` }}>
+        <div className={`bcord-left-section ${mobileMenuOpen ? 'mobile-open' : ''}`} style={{ width: `${leftSectionWidth}px` }}>
           <div className="resize-handle resize-handle-right" onMouseDown={handleResizeStart} />
           <div className="bcord-left-content">
             {/* SERVER RAIL */}

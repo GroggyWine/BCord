@@ -51,6 +51,7 @@ export default function ChatPage() {
   const [unreadChannels, setUnreadChannels] = useState({}); // { "serverId-channelName": true/false }
   const [leftSectionWidth, setLeftSectionWidth] = useState(210);
   const [showFriendsModal, setShowFriendsModal] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   
   const messagesEndRef = useRef(null);
   const resizingRef = useRef(null);
@@ -79,35 +80,48 @@ export default function ChatPage() {
     if (data.type === 'new_message') {
       // Handle new channel message from WebSocket
       const { server_id, channel, message } = data;
+      const serverIdNum = Number(server_id);
+      
+      // Don't mark as unread if sender is current user
+      if (message.sender === currentUser) {
+        // Still add to messages if viewing this channel
+        if (serverIdNum === selectedServerId && channel === selectedChannel) {
+          setMessages(prev => {
+            const exists = prev.some(m => m.id === message.id);
+            if (exists) return prev;
+            return [...prev, message];
+          });
+        }
+        return;
+      }
       
       // Only add message if it's for the currently selected server and channel
-      if (server_id === selectedServerId && channel === selectedChannel) {
+      if (serverIdNum === selectedServerId && channel === selectedChannel) {
         setMessages(prev => {
           // Check if message already exists (from our own send or polling)
           const exists = prev.some(m => m.id === message.id);
           if (exists) return prev;
           
           // Play sound if not from current user
-          if (message.sender !== currentUser) {
-            playNewMessage();
-          }
+          playNewMessage();
           
           return [...prev, message];
         });
       } else {
         // Message is for a different channel - mark as unread
-        const channelKey = `${server_id}-${channel}`;
+        const channelKey = `${serverIdNum}-${channel}`;
         setUnreadChannels(prev => ({ ...prev, [channelKey]: true }));
-        setUnreadServers(prev => ({ ...prev, [server_id]: true }));
+        setUnreadServers(prev => ({ ...prev, [serverIdNum]: true }));
       }
     }
     else if (data.type === 'new_dm') {
-      // Handle new DM message - set unread indicator
-      setHasUnreadDms(true);
+      // Handle new DM message - only set unread if from another user
       if (data.message && data.message.sender_username !== currentUser) {
+        setHasUnreadDms(true);
         setUnreadDmUsers(prev => ({ ...prev, [data.message.sender_username]: true }));
         playDoorbellDingDong();
       }
+      // If sender is current user, don't mark as unread (it's our own message)
     }
     else if (data.type === 'typing') {
       // Could implement typing indicator UI here
@@ -134,31 +148,36 @@ export default function ChatPage() {
     else if (data.type === 'unread_update') {
       // New message in a channel - update unread indicators
       const { server_id, channel, sender } = data;
+      const serverIdNum = Number(server_id);
       
       // Don't mark as unread if it's from current user or if we're viewing that channel
       if (sender === currentUser) return;
-      if (server_id === selectedServerId && channel === selectedChannel) return;
+      if (serverIdNum === selectedServerId && channel === selectedChannel) return;
       
-      const channelKey = `${server_id}-${channel}`;
+      const channelKey = `${serverIdNum}-${channel}`;
       setUnreadChannels(prev => ({ ...prev, [channelKey]: true }));
-      setUnreadServers(prev => ({ ...prev, [server_id]: true }));
+      setUnreadServers(prev => ({ ...prev, [serverIdNum]: true }));
     }
   }, [selectedServerId, selectedChannel, currentUser]);
 
   const { isConnected: wsConnected, subscribeToServer, unsubscribeFromServer } = useWebSocket(handleWebSocketMessage);
 
-  // Subscribe to current server when it changes
+  // Subscribe to ALL servers for real-time unread updates
   useEffect(() => {
-    if (wsConnected && selectedServerId) {
-      console.log('[WS] Subscribing to server:', selectedServerId);
-      subscribeToServer(selectedServerId);
+    if (wsConnected && servers.length > 0) {
+      console.log('[WS] Subscribing to all servers:', servers.map(s => s.id));
+      servers.forEach(server => {
+        subscribeToServer(server.id);
+      });
       
       return () => {
-        console.log('[WS] Unsubscribing from server:', selectedServerId);
-        unsubscribeFromServer(selectedServerId);
+        console.log('[WS] Unsubscribing from all servers');
+        servers.forEach(server => {
+          unsubscribeFromServer(server.id);
+        });
       };
     }
-  }, [wsConnected, selectedServerId, subscribeToServer, unsubscribeFromServer]);
+  }, [wsConnected, servers, subscribeToServer, unsubscribeFromServer]);
 
   // Get current server and its channels
   const currentServer = servers.find(s => s.id === selectedServerId);
@@ -1139,6 +1158,7 @@ export default function ChatPage() {
     const firstChannel = server?.channels[0] || "general";
     setSelectedChannel(firstChannel);
     markChannelAsRead(firstChannel, serverId);
+    setMobileMenuOpen(false); // Close mobile menu after selection
   }
 
   async function handleCreateServer() {
@@ -1359,6 +1379,23 @@ export default function ChatPage() {
         </div>
       )}
 
+      {/* Mobile Menu Toggle */}
+      <button 
+        className="mobile-menu-toggle"
+        onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+        aria-label="Toggle menu"
+      >
+        {mobileMenuOpen ? '✕' : '☰'}
+      </button>
+      
+      {/* Mobile Overlay */}
+      {mobileMenuOpen && (
+        <div 
+          className="mobile-overlay active"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
       <div className="bcord-chat-topbar">
         <div className="bcord-chat-topbar-left">
           <div className="bcord-chat-topbar-title">{currentServer?.name || "BeKord"}</div>
@@ -1485,7 +1522,7 @@ export default function ChatPage() {
         }}
       >
         {/* LEFT SECTION - RAIL + CHANNELS + USER PANEL */}
-        <div className="bcord-left-section" style={{ width: `${leftSectionWidth}px` }}>
+        <div className={`bcord-left-section ${mobileMenuOpen ? 'mobile-open' : ''}`} style={{ width: `${leftSectionWidth}px` }}>
           <div 
             className="resize-handle resize-handle-right"
             onMouseDown={handleResizeStart}
@@ -1572,7 +1609,7 @@ export default function ChatPage() {
               <button
                 key={channel}
                 className={`bcord-chat-room-item ${selectedChannel === channel ? "active" : ""}`}
-                onClick={() => { playChannelClick(); setSelectedChannel(channel); markChannelAsRead(channel, selectedServerId); }}
+                onClick={() => { playChannelClick(); setSelectedChannel(channel); markChannelAsRead(channel, selectedServerId); setMobileMenuOpen(false); }}
               >
                 <div className="bcord-chat-room-content">
                   {unreadChannels[`${selectedServerId}-${channel}`] && <span className="channel-unread-dot" />}

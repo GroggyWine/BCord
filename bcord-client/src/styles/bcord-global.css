@@ -2747,3 +2747,302 @@ button {
   background: #ed4245;
   border-radius: 50%;
 }
+
+/* ============================================================================
+   MOBILE RESPONSIVE STYLES
+   ============================================================================ */
+
+/* Mobile menu toggle button */
+.mobile-menu-toggle {
+  display: none;
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 1001;
+  background: #1e40af;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  color: white;
+  font-size: 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.mobile-menu-toggle:hover {
+  background: #2563eb;
+}
+
+/* Mobile overlay for closing drawers */
+.mobile-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 999;
+}
+
+.mobile-overlay.active {
+  display: block;
+}
+
+/* ============================================================================
+   TABLET BREAKPOINT (768px and below)
+   ============================================================================ */
+@media screen and (max-width: 768px) {
+  /* Show mobile menu toggle */
+  .mobile-menu-toggle {
+    display: block;
+  }
+  
+  /* Adjust topbar for mobile */
+  .bcord-chat-topbar {
+    padding-left: 60px; /* Make room for hamburger */
+  }
+  
+  /* Main grid becomes single column */
+  .bcord-chat-body {
+    grid-template-columns: 1fr !important;
+  }
+  
+  /* Left section becomes slide-out drawer */
+  .bcord-left-section,
+  .bcord-chat-col.bcord-chat-rail {
+    position: fixed;
+    top: 0;
+    left: -280px;
+    width: 280px;
+    height: 100vh;
+    z-index: 1000;
+    transition: left 0.3s ease;
+    background: #0f172a;
+  }
+  
+  .bcord-left-section.mobile-open,
+  .bcord-chat-col.bcord-chat-rail.mobile-open {
+    left: 0;
+  }
+  
+  /* Hide Rumble panel on mobile by default */
+  .bcord-chat-rumble {
+    display: none !important;
+  }
+  
+  /* Rumble collapse button hidden on mobile */
+  .rumble-collapse-btn {
+    display: none !important;
+  }
+  
+  /* Message area takes full width */
+  .bcord-chat-col.bcord-chat-messages {
+    width: 100%;
+    max-width: 100%;
+  }
+  
+  /* Message input adjustments */
+  .bcord-chat-message-input {
+    padding: 8px 12px;
+  }
+  
+  .bcord-chat-message-input input {
+    font-size: 16px; /* Prevents zoom on iOS */
+  }
+  
+  /* User panel at bottom - make it more compact */
+  .bcord-user-panel {
+    padding: 8px 10px;
+  }
+  
+  /* Notification panel adjustments */
+  .bcord-invitations-panel {
+    right: 10px;
+    left: 10px;
+    width: auto;
+    max-width: none;
+  }
+  
+  /* Friends modal full screen on mobile */
+  .bcord-friends-modal-overlay .bcord-friends-modal {
+    width: 95%;
+    max-width: none;
+    margin: 10px;
+    max-height: 90vh;
+  }
+}
+
+/* ============================================================================
+   PHONE BREAKPOINT (480px and below)
+   ============================================================================ */
+@media screen and (max-width: 480px) {
+  /* Even more compact topbar */
+  .bcord-chat-topbar {
+    padding: 8px 12px 8px 55px;
+  }
+  
+  .bcord-chat-topbar-title {
+    font-size: 14px;
+  }
+  
+  .bcord-chat-topbar-right {
+    gap: 8px;
+  }
+  
+  /* Smaller message bubbles */
+  .bcord-chat-message {
+    padding: 8px 10px;
+    margin-bottom: 6px;
+  }
+  
+  .bcord-chat-message-sender {
+    font-size: 13px;
+  }
+  
+  .bcord-chat-message-text {
+    font-size: 14px;
+  }
+  
+  .bcord-chat-message-time {
+    font-size: 10px;
+  }
+  
+  /* Compact channel list */
+  .bcord-chat-rooms-header {
+    padding: 10px 12px;
+  }
+  
+  .bcord-chat-room-item {
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  
+  /* Server icons smaller on phones */
+  .bcord-chat-rail-server,
+  .bcord-chat-rail-room {
+    width: 44px;
+    height: 44px;
+    font-size: 14px;
+  }
+  
+  /* Send button */
+  .bcord-chat-send-btn {
+    padding: 8px 16px;
+    font-size: 14px;
+  }
+  
+  /* Create server modal */
+  .bcord-create-server-modal {
+    width: 95%;
+    padding: 16px;
+  }
+  
+  /* DM list compact */
+  .dm-conversation-item {
+    padding: 10px 12px;
+  }
+}
+
+/* ============================================================================
+   TOUCH-FRIENDLY IMPROVEMENTS
+   ============================================================================ */
+@media (hover: none) and (pointer: coarse) {
+  /* Minimum tap target size of 44px */
+  .bcord-chat-rail-server,
+  .bcord-chat-rail-room,
+  .bcord-chat-room-item,
+  .bcord-chat-send-btn,
+  .bcord-invitations-bell-btn,
+  button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  /* Remove hover effects on touch devices */
+  .bcord-chat-rail-room:hover,
+  .bcord-chat-room-item:hover {
+    transform: none;
+  }
+  
+  /* Add active states for touch feedback */
+  .bcord-chat-rail-room:active,
+  .bcord-chat-room-item:active {
+    background: rgba(30, 64, 175, 0.4);
+    transform: scale(0.98);
+  }
+}
+
+/* ============================================================================
+   DM PAGE MOBILE STYLES
+   ============================================================================ */
+@media screen and (max-width: 768px) {
+  /* DM page layout */
+  .dm-page-container {
+    flex-direction: column;
+  }
+  
+  /* DM sidebar becomes slide-out */
+  .dm-sidebar,
+  .bcord-dm-sidebar {
+    position: fixed;
+    top: 0;
+    left: -280px;
+    width: 280px;
+    height: 100vh;
+    z-index: 1000;
+    transition: left 0.3s ease;
+    background: #0f172a;
+  }
+  
+  .dm-sidebar.mobile-open,
+  .bcord-dm-sidebar.mobile-open {
+    left: 0;
+  }
+  
+  /* DM message area full width */
+  .dm-messages-area {
+    width: 100%;
+  }
+}
+
+/* ============================================================================
+   LANDSCAPE PHONE OPTIMIZATIONS
+   ============================================================================ */
+@media screen and (max-height: 500px) and (orientation: landscape) {
+  .bcord-chat-topbar {
+    padding: 6px 12px 6px 55px;
+  }
+  
+  .bcord-chat-message {
+    padding: 6px 8px;
+    margin-bottom: 4px;
+  }
+  
+  .bcord-user-panel {
+    padding: 6px 10px;
+  }
+  
+  .bcord-chat-message-input {
+    padding: 6px 10px;
+  }
+}
+
+/* ============================================================================
+   SAFE AREA INSETS (for notched phones)
+   ============================================================================ */
+@supports (padding: max(0px)) {
+  .bcord-chat-topbar {
+    padding-top: max(10px, env(safe-area-inset-top));
+  }
+  
+  .bcord-user-panel,
+  .bcord-chat-message-input {
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  
+  .bcord-left-section,
+  .bcord-chat-col.bcord-chat-rail {
+    padding-left: max(0px, env(safe-area-inset-left));
+  }
+}

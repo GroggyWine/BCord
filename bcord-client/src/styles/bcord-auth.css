@@ -349,3 +349,63 @@
   color: #94a3b8;
   font-style: italic;
 }
+
+/* ============================================================================
+   MOBILE RESPONSIVE STYLES FOR AUTH PAGES
+   ============================================================================ */
+
+@media screen and (max-width: 480px) {
+  .bcord-auth-page {
+    padding: 16px;
+  }
+  
+  .bcord-auth-shell {
+    gap: 12px;
+  }
+  
+  .bcord-auth-card {
+    padding: 18px 16px;
+  }
+  
+  .bcord-auth-title {
+    font-size: 18px;
+  }
+  
+  .bcord-input {
+    font-size: 16px; /* Prevents zoom on iOS */
+    padding: 10px 12px;
+  }
+  
+  .bcord-button {
+    padding: 12px 14px;
+    font-size: 14px;
+  }
+  
+  .bcord-captcha-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .bcord-captcha-input-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .bcord-captcha-input-row .bcord-input {
+    width: 100%;
+  }
+  
+  .bcord-captcha-refresh-btn {
+    width: 100%;
+  }
+}
+
+/* Safe area for notched phones */
+@supports (padding: max(0px)) {
+  .bcord-auth-page {
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
+}
