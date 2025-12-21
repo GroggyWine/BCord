@@ -81,6 +81,8 @@ void WebSocketManager::send_to_server(int64_t server_id, const nlohmann::json& m
     auto it = server_subscriptions_.find(server_id);
     if (it != server_subscriptions_.end()) {
         std::string msg_str = msg.dump();
+        std::string msg_type = msg.contains("type") ? msg["type"].get<std::string>() : "unknown";
+        ws_log("Broadcasting " + msg_type + " to server " + std::to_string(server_id) + " (" + std::to_string(it->second.size()) + " subscribers)");
         for (const auto& username : it->second) {
             auto conn_it = connections_.find(username);
             if (conn_it != connections_.end()) {
@@ -89,6 +91,8 @@ void WebSocketManager::send_to_server(int64_t server_id, const nlohmann::json& m
                 }
             }
         }
+    } else {
+        ws_log("No subscribers for server " + std::to_string(server_id));
     }
 }
 

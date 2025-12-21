@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import axios from "axios";
 import useTokenRefresher from "../hooks/useTokenRefresher";
 import AdminPanel from "./AdminPanel";
@@ -9,6 +9,7 @@ import { useWebSocket } from "../hooks/useWebSocket";
 
 export default function ChatPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   
   // Auto-refresh access token every 10 minutes
   useTokenRefresher(10);
@@ -16,7 +17,7 @@ export default function ChatPage() {
   // Servers (loaded from backend)
   const [servers, setServers] = useState([]);
   const [selectedServerId, setSelectedServerId] = useState(null);
-  const [selectedChannel, setSelectedChannel] = useState("general");
+  const [selectedChannel, setSelectedChannel] = useState(null); // null = show "Select a channel"
   
   // State
   const [messages, setMessages] = useState([]);
@@ -107,8 +108,12 @@ export default function ChatPage() {
           
           return [...prev, message];
         });
+        // Mark as read in backend since user is viewing this channel
+        // This prevents unread indicator when navigating away
+        markChannelAsRead(channel, serverIdNum);
       } else {
-        // Message is for a different channel - mark as unread
+        // Message is for a different channel - play sound and mark as unread
+        playNewMessage();
         const channelKey = `${serverIdNum}-${channel}`;
         setUnreadChannels(prev => ({ ...prev, [channelKey]: true }));
         setUnreadServers(prev => ({ ...prev, [serverIdNum]: true }));
@@ -266,14 +271,8 @@ export default function ChatPage() {
           authenticatedUserRef.current = username;
           setCurrentUser(username);
           
-          
-          // Check if user is admin by trying to access admin endpoint
-          try {
-            await axios.get("/api/admin/users", { withCredentials: true });
-            setIsAdmin(true);
-          } catch {
-            setIsAdmin(false);
-          }
+          // is_admin is now returned directly from /api/profile
+          setIsAdmin(res.data.is_admin || false);
         } else {
           // No user in response - redirect to login
           console.error("No user in profile response - redirecting to login");
@@ -423,20 +422,23 @@ export default function ChatPage() {
     // Mark as in-flight
     markReadInFlight.current.add(cacheKey);
     
-    // Update local state immediately (optimistic)
-    setUnreadChannels(prev => ({...prev, [cacheKey]: false}));
-    
-    // Check if server still has any unread channels
-    const server = servers.find(s => s.id === serverId);
-    if (server) {
-      const hasOtherUnread = server.channels?.some(ch => {
-        const key = `${serverId}-${ch}`;
-        return ch !== channelName && unreadChannels[key];
-      });
-      if (!hasOtherUnread) {
-        setUnreadServers(prev => ({...prev, [serverId]: false}));
+    // Update channel unread state and recalculate server unread in one go
+    setUnreadChannels(prev => {
+      const updated = {...prev, [cacheKey]: false};
+      
+      // Check if server still has any unread channels using the UPDATED state
+      const server = servers.find(s => s.id === serverId);
+      if (server) {
+        const hasOtherUnread = server.channels?.some(ch => {
+          const key = `${serverId}-${ch}`;
+          return updated[key] === true;
+        });
+        // Update server unread based on whether any channels are still unread
+        setUnreadServers(prevServers => ({...prevServers, [serverId]: hasOtherUnread}));
       }
-    }
+      
+      return updated;
+    });
     
     // Fire and forget the API call (non-blocking)
     axios.post(`/api/channels/${channelId}/mark-read`, {}, {
@@ -444,16 +446,14 @@ export default function ChatPage() {
     })
     .catch(err => {
       console.error("Failed to mark channel as read:", err);
-      // Optionally revert optimistic update on error
-      // setUnreadChannels(prev => ({...prev, [cacheKey]: true}));
     })
     .finally(() => {
       markReadInFlight.current.delete(cacheKey);
     });
   }
-  async function handleAcceptInvitation(serverId) {
+  async function handleAcceptInvitation(invitationId, serverId) {
     try {
-      await axios.post(`/api/invitations/${serverId}/accept`, {}, {
+      await axios.post(`/api/invitations/${invitationId}/accept`, {}, {
         withCredentials: true,
       });
       playServerJoined();
@@ -498,9 +498,9 @@ export default function ChatPage() {
     }
   }
 
-  async function handleDeclineInvitation(serverId) {
+  async function handleDeclineInvitation(invitationId) {
     try {
-      await axios.post(`/api/invitations/${serverId}/decline`, {}, {
+      await axios.post(`/api/invitations/${invitationId}/decline`, {}, {
         withCredentials: true,
       });
       // Reload invitations
@@ -589,8 +589,19 @@ export default function ChatPage() {
           
           setServers(serversWithChannels);
           
-          // Select first server by default
-          if (serversWithChannels.length > 0) {
+          // Check URL param for server ID, otherwise select first server
+          const urlServerId = searchParams.get('server');
+          if (urlServerId) {
+            const serverId = Number(urlServerId);
+            const serverExists = serversWithChannels.some(s => s.id === serverId);
+            if (serverExists) {
+              setSelectedServerId(serverId);
+              // Clear the URL param after using it
+              setSearchParams({});
+            } else if (serversWithChannels.length > 0) {
+              setSelectedServerId(serversWithChannels[0].id);
+            }
+          } else if (serversWithChannels.length > 0) {
             setSelectedServerId(serversWithChannels[0].id);
           }
         }
@@ -679,7 +690,7 @@ export default function ChatPage() {
   }, []);
   // Load messages for current server + channel
   async function loadMessages(channel, serverId) {
-    if (!serverId) return;
+    if (!serverId || !channel) return;
     
     try {
       const res = await axios.get(
@@ -1027,7 +1038,7 @@ export default function ChatPage() {
   }, [currentUser, servers.length]);
 
   async function sendMessage() {
-    if (!newBody.trim() || !selectedServerId) return;
+    if (!newBody.trim() || !selectedServerId || !selectedChannel) return;
     try {
       await axios.post(
         "/api/messages",
@@ -1153,11 +1164,9 @@ export default function ChatPage() {
   function handleSelectServer(serverId) {
     playServerClick();
     setSelectedServerId(serverId);
-    const server = servers.find(s => s.id === serverId);
-    // Switch to that server's first channel (always has #general)
-    const firstChannel = server?.channels[0] || "general";
-    setSelectedChannel(firstChannel);
-    markChannelAsRead(firstChannel, serverId);
+    // Don't auto-select a channel - let user choose (like DM page)
+    setSelectedChannel(null);
+    setMessages([]); // Clear messages since no channel selected
     setMobileMenuOpen(false); // Close mobile menu after selection
   }
 
@@ -1288,7 +1297,7 @@ export default function ChatPage() {
       // Update server's channels in state
       setServers(servers.map(s => 
         s.id === selectedServerId 
-          ? { ...s, channels: channelsRes.data.channels.map(ch => { channelIdCache.current[`${server.id}-${ch.name}`] = ch.id; return ch.name; }) }
+          ? { ...s, channels: channelsRes.data.channels.map(ch => { channelIdCache.current[`${s.id}-${ch.name}`] = ch.id; return ch.name; }) }
           : s
       ));
       
@@ -1321,7 +1330,7 @@ export default function ChatPage() {
       // Update server's channels in state
       setServers(servers.map(s => 
         s.id === selectedServerId 
-          ? { ...s, channels: channelsRes.data.channels.map(ch => { channelIdCache.current[`${server.id}-${ch.name}`] = ch.id; return ch.name; }) }
+          ? { ...s, channels: channelsRes.data.channels.map(ch => { channelIdCache.current[`${s.id}-${ch.name}`] = ch.id; return ch.name; }) }
           : s
       ));
       
@@ -1457,13 +1466,13 @@ export default function ChatPage() {
                           <div className="bcord-invitation-actions">
                             <button
                               className="bcord-invitation-accept"
-                              onClick={() => handleAcceptInvitation(inv.server_id)}
+                              onClick={() => handleAcceptInvitation(inv.id, inv.server_id)}
                             >
                               ✓
                             </button>
                             <button
                               className="bcord-invitation-decline"
-                              onClick={() => handleDeclineInvitation(inv.server_id)}
+                              onClick={() => handleDeclineInvitation(inv.id)}
                             >
                               ✗
                             </button>
@@ -1678,84 +1687,96 @@ export default function ChatPage() {
 
         {/* MAIN CHAT AREA */}
         <div className="bcord-chat-col bcord-chat-main">
-          <div className="bcord-chat-main-header">
-            <div className="bcord-chat-main-room">
-                  <span className="hash">#</span>
-              <span>{selectedChannel}</span>
+          {!selectedChannel ? (
+            /* No channel selected - show "Select a channel" message */
+            <div className="bcord-select-channel-prompt">
+              <div className="bcord-select-channel-icon">#</div>
+              <h2>Select a channel</h2>
+              <p>Choose a channel from the list to start chatting</p>
             </div>
-          </div>
-
-          <div className="bcord-chat-messages" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
-            {messages.length === 0 && (
-              <div className="bcord-chat-empty">No messages yet.</div>
-            )}
-            {messages.map((msg, index) => (
-              <React.Fragment key={msg.id}>
-                {shouldShowDateSeparator(msg, messages[index - 1]) && (
-                  <div className="bcord-chat-date-separator">
-                    <span className="bcord-chat-date-line"></span>
-                    <span className="bcord-chat-date-text">{formatDate(msg.created_at)}</span>
-                    <span className="bcord-chat-date-line"></span>
-                  </div>
-                )}
-                <div className="bcord-chat-message">
-                  <div className="bcord-chat-message-avatar">
-                    {msg.sender.slice(0, 2).toUpperCase()}
-                  </div>
-                  <div className="bcord-chat-message-body">
-                    <div className="bcord-chat-message-meta">
-                      <span className="sender">{msg.sender}</span>
-                      <span className="time">{formatTime(msg.created_at)}</span>
-                    </div>
-                    <div className="bcord-chat-message-text">{msg.body}</div>
-                  </div>
+          ) : (
+            /* Channel selected - show normal chat UI */
+            <>
+              <div className="bcord-chat-main-header">
+                <div className="bcord-chat-main-room">
+                  <span className="hash">#</span>
+                  <span>{selectedChannel}</span>
                 </div>
-              </React.Fragment>
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
+              </div>
 
-          <div className="bcord-chat-composer">
-            <textarea
-              ref={messageInputRef}
-              className="bcord-chat-input"
-              value={newBody}
-              onChange={(e) => {
-                const value = e.target.value;
-                if (value.length <= 500) {
-                  setNewBody(value);
-                  // Auto-resize
-                  e.target.style.height = 'auto';
-                  e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  sendMessage();
-                  // Reset height after sending
-                  e.target.style.height = 'auto';
-                }
-              }}
-              placeholder={`Message #${selectedChannel}`}
-              rows={1}
-              maxLength={500}
-            />
-            {newBody.length > 400 && (
-              <span style={{
-                position: 'absolute',
-                right: '80px',
-                bottom: '18px',
-                fontSize: '11px',
-                color: newBody.length >= 500 ? '#ef4444' : '#9ca3af'
-              }}>
-                {newBody.length}/500
-              </span>
-            )}
-            <button className="bcord-chat-send-btn" onClick={sendMessage}>
-              Send
-            </button>
-          </div>
+              <div className="bcord-chat-messages" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+                {messages.length === 0 && (
+                  <div className="bcord-chat-empty">No messages yet.</div>
+                )}
+                {messages.map((msg, index) => (
+                  <React.Fragment key={msg.id}>
+                    {shouldShowDateSeparator(msg, messages[index - 1]) && (
+                      <div className="bcord-chat-date-separator">
+                        <span className="bcord-chat-date-line"></span>
+                        <span className="bcord-chat-date-text">{formatDate(msg.created_at)}</span>
+                        <span className="bcord-chat-date-line"></span>
+                      </div>
+                    )}
+                    <div className="bcord-chat-message">
+                      <div className="bcord-chat-message-avatar">
+                        {msg.sender.slice(0, 2).toUpperCase()}
+                      </div>
+                      <div className="bcord-chat-message-body">
+                        <div className="bcord-chat-message-meta">
+                          <span className="sender">{msg.sender}</span>
+                          <span className="time">{formatTime(msg.created_at)}</span>
+                        </div>
+                        <div className="bcord-chat-message-text">{msg.body}</div>
+                      </div>
+                    </div>
+                  </React.Fragment>
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
+
+              <div className="bcord-chat-composer">
+                <textarea
+                  ref={messageInputRef}
+                  className="bcord-chat-input"
+                  value={newBody}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    if (value.length <= 500) {
+                      setNewBody(value);
+                      // Auto-resize
+                      e.target.style.height = 'auto';
+                      e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      sendMessage();
+                      // Reset height after sending
+                      e.target.style.height = 'auto';
+                    }
+                  }}
+                  placeholder={`Message #${selectedChannel}`}
+                  rows={1}
+                  maxLength={500}
+                />
+                {newBody.length > 400 && (
+                  <span style={{
+                    position: 'absolute',
+                    right: '80px',
+                    bottom: '18px',
+                    fontSize: '11px',
+                    color: newBody.length >= 500 ? '#ef4444' : '#9ca3af'
+                  }}>
+                    {newBody.length}/500
+                  </span>
+                )}
+                <button className="bcord-chat-send-btn" onClick={sendMessage}>
+                  Send
+                </button>
+              </div>
+            </>
+          )}
         </div>
 
         {/* RUMBLE COLLAPSE BUTTON - Always visible */}

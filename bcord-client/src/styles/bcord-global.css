@@ -2602,9 +2602,30 @@ button {
 }
 
 .friends-list {
+  max-height: 50vh;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* Custom scrollbar for friends list */
+.friends-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.friends-list::-webkit-scrollbar-track {
+  background: #1e1f22;
+  border-radius: 4px;
+}
+
+.friends-list::-webkit-scrollbar-thumb {
+  background: #4f545c;
+  border-radius: 4px;
+}
+
+.friends-list::-webkit-scrollbar-thumb:hover {
+  background: #5d6269;
 }
 
 .friends-empty {
@@ -3045,4 +3066,119 @@ button {
   .bcord-chat-col.bcord-chat-rail {
     padding-left: max(0px, env(safe-area-inset-left));
   }
+}
+
+/* ============================================================================
+   SELECT A CHANNEL PROMPT (like DM page "Select a conversation")
+   ============================================================================ */
+.bcord-select-channel-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #6b7280;
+  text-align: center;
+  padding: 40px;
+}
+
+.bcord-select-channel-prompt .bcord-select-channel-icon {
+  font-size: 64px;
+  color: #374151;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.bcord-select-channel-prompt h2 {
+  font-size: 24px;
+  font-weight: 600;
+  color: #9ca3af;
+  margin: 0 0 8px 0;
+}
+
+.bcord-select-channel-prompt p {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0;
+}
+
+/* Friend Context Menu */
+.friend-context-menu {
+  background: #111214;
+  border: 1px solid #2b2d31;
+  border-radius: 4px;
+  padding: 6px 8px;
+  min-width: 180px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  color: #b5bac1;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.context-menu-item:hover {
+  background: #5865f2;
+  color: #fff;
+}
+
+.context-menu-item.context-menu-danger:hover {
+  background: #ed4245;
+  color: #fff;
+}
+
+.friend-item-clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.friend-item-clickable:hover {
+  background: rgba(79, 84, 92, 0.3);
+}
+
+/* DM Context Menu */
+.dm-context-menu {
+  background: #111214;
+  border: 1px solid #2b2d31;
+  border-radius: 4px;
+  padding: 6px 8px;
+  min-width: 180px;
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* DM Section Headers (Pinned, All Messages) */
+.dm-section-header {
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #8b8d91;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* DM Drag and Drop Styles */
+.bcord-chat-room-item.dragging {
+  opacity: 0.5;
+  background: #3b3d44;
+}
+
+.bcord-chat-room-item.drag-over {
+  border-top: 2px solid #5865f2;
+}
+
+.bcord-chat-room-item[draggable="true"] {
+  cursor: grab;
+}
+
+.bcord-chat-room-item[draggable="true"]:active {
+  cursor: grabbing;
 }

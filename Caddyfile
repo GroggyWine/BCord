@@ -144,6 +144,19 @@ https://bekord.com, https://www.bekord.com {
     handle {
         root * /srv/bcord/site
         try_files {path} /index.html
+        
+        # Prevent caching of index.html so users always get latest JS/CSS references
+        @html {
+            path /index.html /
+        }
+        header @html Cache-Control "no-cache, no-store, must-revalidate"
+        
+        # Allow caching of hashed assets (they have unique names per build)
+        @assets {
+            path /assets/*
+        }
+        header @assets Cache-Control "public, max-age=31536000, immutable"
+        
         file_server
     }
 

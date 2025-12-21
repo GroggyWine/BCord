@@ -13,9 +13,52 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 
 const WS_URL = `wss://${window.location.host}/ws`;
 const HEARTBEAT_INTERVAL = 25000; // 25 seconds
-const RECONNECT_BASE_DELAY = 1000; // 1 second
-const RECONNECT_MAX_DELAY = 30000; // 30 seconds
-const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_BASE_DELAY = 2000; // 2 seconds (increased)
+const RECONNECT_MAX_DELAY = 60000; // 60 seconds (increased)
+const MAX_RECONNECT_ATTEMPTS = 5; // Reduced from 10
+
+// Dedupe ws-token requests - singleton promise
+let wsTokenPromise = null;
+let wsTokenExpiry = 0;
+
+async function getWsToken() {
+  const now = Date.now();
+  
+  // If we have a cached valid token (cache for 5 minutes)
+  if (wsTokenPromise && now < wsTokenExpiry) {
+    return wsTokenPromise;
+  }
+  
+  // Start a new request
+  wsTokenPromise = fetch('/api/auth/ws-token', { credentials: 'include' })
+    .then(res => {
+      if (res.ok) {
+        wsTokenExpiry = now + 300000; // Cache for 5 minutes
+        return res.json();
+      }
+      // On 401, try refreshing token first
+      if (res.status === 401) {
+        console.log('[WS] ws-token got 401, attempting token refresh');
+        return fetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({})
+        }).then(refreshRes => {
+          if (refreshRes.ok) {
+            // Retry ws-token after refresh
+            return fetch('/api/auth/ws-token', { credentials: 'include' })
+              .then(r => r.ok ? r.json() : null);
+          }
+          return null;
+        });
+      }
+      return null;
+    })
+    .catch(() => null);
+  
+  return wsTokenPromise;
+}
 
 export function useWebSocket(onMessage) {
   const wsRef = useRef(null);
@@ -74,7 +117,7 @@ export function useWebSocket(onMessage) {
   }, [send]);
 
   // Connect to WebSocket
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       console.log('[WS] Already connected');
       return;
@@ -84,8 +127,22 @@ export function useWebSocket(onMessage) {
     console.log('[WS] Connecting to', WS_URL);
 
     try {
-      // Connect without token - server uses HttpOnly cookie
-      wsRef.current = new WebSocket(WS_URL);
+      // Get a WebSocket token from the backend (validates session and returns token)
+      // Uses deduped/cached getWsToken to prevent request storms
+      let wsUrl = WS_URL;
+      try {
+        const data = await getWsToken();
+        if (data && data.token) {
+          wsUrl = `${WS_URL}?token=${encodeURIComponent(data.token)}`;
+          console.log('[WS] Got WS token from API (deduped)');
+        } else {
+          console.log('[WS] Could not get WS token, will retry on reconnect');
+        }
+      } catch (err) {
+        console.log('[WS] Error getting WS token:', err);
+      }
+      
+      wsRef.current = new WebSocket(wsUrl);
 
       wsRef.current.onopen = () => {
         console.log('[WS] Connected');
@@ -125,16 +182,21 @@ export function useWebSocket(onMessage) {
 
         // Attempt reconnection if not intentionally closed
         if (event.code !== 1000 && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-          const delay = Math.min(
-            RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttemptsRef.current),
-            RECONNECT_MAX_DELAY
-          );
-          console.log(`[WS] Reconnecting in ${delay}ms (attempt ${reconnectAttemptsRef.current + 1})`);
+          // Add jitter (0-50% of base delay) to prevent thundering herd
+          const jitter = Math.random() * RECONNECT_BASE_DELAY * 0.5;
+          const baseDelay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttemptsRef.current);
+          const delay = Math.min(baseDelay + jitter, RECONNECT_MAX_DELAY);
+          console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttemptsRef.current + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+          
+          // Invalidate cached token on reconnect
+          wsTokenExpiry = 0;
           
           reconnectTimeoutRef.current = setTimeout(() => {
             reconnectAttemptsRef.current++;
             connect();
           }, delay);
+        } else if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+          console.log('[WS] Max reconnect attempts reached, giving up');
         }
       };
 

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
 import useTokenRefresher from "../hooks/useTokenRefresher";
-import { playDoorbellDingDong, playMessageSent, playChannelClick, playInviteChime, playLeaveDm, playServerClick } from "../utils/sounds";
+import { playDoorbellDingDong, playMessageSent, playChannelClick, playInviteChime, playLeaveDm, playServerClick, playNewMessage } from "../utils/sounds";
 
 import FriendsModal from "./FriendsModal";
 import { useWebSocket } from "../hooks/useWebSocket";
@@ -43,6 +43,13 @@ export default function DmPage() {
   const [pendingFriendRequests, setPendingFriendRequests] = useState([]);
   const [users, setUsers] = useState([]);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [unreadServers, setUnreadServers] = useState({}); // { serverId: true/false }
+  
+  // DM list context menu and drag-drop state
+  const [dmContextMenu, setDmContextMenu] = useState({ visible: false, x: 0, y: 0, dm: null });
+  const [draggingDm, setDraggingDm] = useState(null);
+  const [dragOverDm, setDragOverDm] = useState(null);
+  const [dragSection, setDragSection] = useState(null); // "pinned" or "normal"
   
   const messagesEndRef = useRef(null);
   const prevMessageCountRef = useRef(0);
@@ -86,7 +93,9 @@ export default function DmPage() {
           if (exists) return prev;
           return [...prev, message];
         });
-        // Don't mark as unread since user is viewing this chat
+        // Mark as read in backend since user is viewing this chat
+        // This prevents the unread indicator when navigating away
+        axios.post(`/api/dm/${dmIdNum}/mark-read`, {}, { withCredentials: true }).catch(() => {});
         return;
       }
       
@@ -102,6 +111,24 @@ export default function DmPage() {
       // Could show typing indicator here
       console.log(`[WS DM] ${data.username} is typing in DM ${data.dm_id}`);
     }
+    else if (data.type === 'new_message') {
+      // Handle new server channel message - update unread indicator
+      const { server_id, channel, message } = data;
+      const serverIdNum = Number(server_id);
+      
+      console.log('[DmPage WS] new_message received:', { server_id: serverIdNum, channel, sender: message?.sender, currentUser });
+      
+      // Don't mark as unread if sender is current user
+      if (message?.sender === currentUser) {
+        console.log('[DmPage WS] Ignoring own message');
+        return;
+      }
+      
+      // Play notification sound and mark server as having unread messages
+      playNewMessage();
+      console.log('[DmPage WS] Setting unread for server:', serverIdNum);
+      setUnreadServers(prev => ({ ...prev, [serverIdNum]: true }));
+    }
     else if (data.type === 'user_online') {
       setOnlineUsers(prev => [...new Set([...prev, data.username])]);
     }
@@ -110,7 +137,7 @@ export default function DmPage() {
     }
   }, [selectedDmId, currentUser]);
 
-  const { send: wsSend, subscribeToDm, isConnected: wsConnected } = useWebSocket(handleWebSocketMessage);
+  const { send: wsSend, subscribeToDm, subscribeToServer, isConnected: wsConnected } = useWebSocket(handleWebSocketMessage);
 
   // Subscribe to current DM when it changes
   useEffect(() => {
@@ -126,14 +153,8 @@ export default function DmPage() {
         const res = await axios.get("/api/profile", { withCredentials: true });
         if (res.data?.user) {
           setCurrentUser(res.data.user);
-          
-          // Check if user is admin by trying to access admin endpoint
-          try {
-            await axios.get("/api/admin/users", { withCredentials: true });
-            setIsAdmin(true);
-          } catch {
-            setIsAdmin(false);
-          }
+          // is_admin is now returned directly from /api/profile
+          setIsAdmin(res.data.is_admin || false);
         } else {
           navigate("/login");
         }
@@ -158,6 +179,56 @@ export default function DmPage() {
     }
     loadServers();
   }, []);
+
+  // Fetch server unread status on mount only (WebSocket handles real-time)
+  useEffect(() => {
+    async function fetchServerUnreadStatus() {
+      if (servers.length === 0) return;
+      
+      const serverUnreadMap = {};
+      
+      for (const server of servers) {
+        try {
+          const res = await axios.get(`/api/servers/${server.id}/unread`, {
+            withCredentials: true,
+          });
+          
+          // Server has unread if ANY channel has unread
+          let serverHasUnread = false;
+          if (res.data.channels) {
+            serverHasUnread = res.data.channels.some(ch => ch.has_unread);
+          }
+          serverUnreadMap[server.id] = serverHasUnread;
+        } catch (err) {
+          console.error(`Failed to fetch unread for server ${server.id}:`, err);
+        }
+      }
+      
+      setUnreadServers(serverUnreadMap);
+    }
+
+    fetchServerUnreadStatus(); // Only on mount/servers change, WebSocket handles real-time
+  }, [servers]);
+
+  // Subscribe to all servers for real-time unread updates
+  useEffect(() => {
+    if (servers.length === 0) {
+      console.log('[DmPage] No servers to subscribe to');
+      return;
+    }
+    if (!wsConnected) {
+      console.log('[DmPage] WebSocket not connected yet, waiting...');
+      return;
+    }
+    
+    console.log('[DmPage] WebSocket connected, subscribing to', servers.length, 'servers:', servers.map(s => s.id));
+    
+    // Subscribe to each server for unread notifications
+    servers.forEach(server => {
+      console.log('[DmPage] Subscribing to server:', server.id, server.name);
+      subscribeToServer(server.id);
+    });
+  }, [wsConnected, servers, subscribeToServer]);
 
   // Load DM list
   useEffect(() => {
@@ -393,19 +464,25 @@ export default function DmPage() {
   }, [handleResizeMove]);
 
   // Notification handlers
-  async function handleAcceptInvitation(serverId) {
+  async function handleAcceptInvitation(invitationId, serverId) {
     try {
-      await axios.post(`/api/invitations/${serverId}/accept`, {}, { withCredentials: true });
+      await axios.post(`/api/invitations/${invitationId}/accept`, {}, { withCredentials: true });
+      // Reload invitations
       const invRes = await axios.get("/api/invitations", { withCredentials: true });
       setInvitations(invRes.data.invitations || []);
+      // Reload servers to show the newly joined server
+      const serverRes = await axios.get("/api/servers/list", { withCredentials: true });
+      if (serverRes.data?.servers) {
+        setServers(serverRes.data.servers);
+      }
     } catch (err) {
       alert(err.response?.data?.error || "Failed to accept invitation");
     }
   }
 
-  async function handleDeclineInvitation(serverId) {
+  async function handleDeclineInvitation(invitationId) {
     try {
-      await axios.post(`/api/invitations/${serverId}/decline`, {}, { withCredentials: true });
+      await axios.post(`/api/invitations/${invitationId}/decline`, {}, { withCredentials: true });
       const invRes = await axios.get("/api/invitations", { withCredentials: true });
       setInvitations(invRes.data.invitations || []);
     } catch (err) {
@@ -504,7 +581,211 @@ export default function DmPage() {
   const handleSelectServer = (serverId) => {
     playLeaveDm();
     setMobileMenuOpen(false); // Close mobile menu
-    navigate("/chat");
+
+    // Switch to server chat view
+    setSelectedServerId(serverId);
+    navigate(`/chat/${serverId}`);
+  };
+
+
+  // =========================================================================
+  // DM List Context Menu & Drag-Drop Handlers
+  // =========================================================================
+  
+  // Close context menu when clicking elsewhere
+  useEffect(() => {
+    const handleClickOutside = () => {
+      if (dmContextMenu.visible) {
+        setDmContextMenu({ ...dmContextMenu, visible: false });
+      }
+    };
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [dmContextMenu.visible]);
+
+  // Right-click handler for DM items
+  const handleDmContextMenu = (e, dm) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDmContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      dm: dm
+    });
+  };
+
+  // Pin/Unpin a DM
+  const handlePinDm = async () => {
+    if (!dmContextMenu.dm) return;
+    const dm = dmContextMenu.dm;
+    const newPinState = !dm.is_pinned;
+    
+    try {
+      await axios.post("/api/dm/pin", { 
+        dm_id: dm.dm_id, 
+        is_pinned: newPinState 
+      }, { withCredentials: true });
+      
+      // Update local state
+      setDmList(prev => prev.map(d => 
+        d.dm_id === dm.dm_id ? { ...d, is_pinned: newPinState } : d
+      ));
+    } catch (err) {
+      console.error("Failed to pin/unpin DM:", err);
+      alert("Failed to update pin status");
+    }
+    
+    setDmContextMenu({ ...dmContextMenu, visible: false });
+  };
+
+  // Remove (hide) a DM from list
+  const handleRemoveDm = async () => {
+    if (!dmContextMenu.dm) return;
+    const dm = dmContextMenu.dm;
+    
+    if (!window.confirm(`Remove conversation with ${dm.other_username}? You can start a new DM to restore it.`)) {
+      setDmContextMenu({ ...dmContextMenu, visible: false });
+      return;
+    }
+    
+    try {
+      await axios.post("/api/dm/hide", { 
+        dm_id: dm.dm_id 
+      }, { withCredentials: true });
+      
+      // Remove from local state
+      setDmList(prev => prev.filter(d => d.dm_id !== dm.dm_id));
+      
+      // If this was the selected DM, clear selection
+      if (selectedDmId === dm.dm_id) {
+        setSelectedDmId(null);
+        setOtherUsername("");
+        setMessages([]);
+        navigate("/dm", { replace: true });
+      }
+    } catch (err) {
+      console.error("Failed to remove DM:", err);
+      alert("Failed to remove conversation");
+    }
+    
+    setDmContextMenu({ ...dmContextMenu, visible: false });
+  };
+
+  // Drag start
+  const handleDragStart = (e, dm, section) => {
+    setDraggingDm(dm);
+    setDragSection(section);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dm.dm_id.toString());
+  };
+
+  // Drag over
+  const handleDragOver = (e, dm) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOverDm?.dm_id !== dm.dm_id) {
+      setDragOverDm(dm);
+    }
+  };
+
+  // Drag leave
+  const handleDragLeave = (e) => {
+    // Only clear if leaving the actual element
+    if (!e.currentTarget.contains(e.relatedTarget)) {
+      setDragOverDm(null);
+    }
+  };
+
+  // Drop - reorder DMs
+  const handleDrop = async (e, targetDm, targetSection) => {
+    e.preventDefault();
+    
+    if (!draggingDm || draggingDm.dm_id === targetDm.dm_id) {
+      setDraggingDm(null);
+      setDragOverDm(null);
+      setDragSection(null);
+      return;
+    }
+    
+    // Only allow drag within same section
+    const sourceIsPinned = draggingDm.is_pinned;
+    const targetIsPinned = targetDm.is_pinned;
+    
+    if (sourceIsPinned !== targetIsPinned) {
+      // Can't drag between pinned and unpinned sections
+      setDraggingDm(null);
+      setDragOverDm(null);
+      setDragSection(null);
+      return;
+    }
+    
+    // Reorder logic
+    const isPinned = sourceIsPinned;
+    const sectionList = dmList.filter(d => d.is_pinned === isPinned);
+    const sourceIndex = sectionList.findIndex(d => d.dm_id === draggingDm.dm_id);
+    const targetIndex = sectionList.findIndex(d => d.dm_id === targetDm.dm_id);
+    
+    if (sourceIndex === -1 || targetIndex === -1) {
+      setDraggingDm(null);
+      setDragOverDm(null);
+      setDragSection(null);
+      return;
+    }
+    
+    // Create new order
+    const newSectionList = [...sectionList];
+    newSectionList.splice(sourceIndex, 1);
+    newSectionList.splice(targetIndex, 0, draggingDm);
+    
+    // Assign new sort orders
+    const orderField = isPinned ? 'pinned_sort_order' : 'sort_order';
+    const updatedList = newSectionList.map((dm, idx) => ({
+      ...dm,
+      [orderField]: idx
+    }));
+    
+    // Update full list
+    const otherSection = dmList.filter(d => d.is_pinned !== isPinned);
+    const newFullList = isPinned 
+      ? [...updatedList, ...otherSection]
+      : [...otherSection, ...updatedList];
+    
+    // Sort properly
+    newFullList.sort((a, b) => {
+      if (a.is_pinned && !b.is_pinned) return -1;
+      if (!a.is_pinned && b.is_pinned) return 1;
+      if (a.is_pinned) return a.pinned_sort_order - b.pinned_sort_order;
+      return a.sort_order - b.sort_order;
+    });
+    
+    setDmList(newFullList);
+    
+    // Persist to server
+    try {
+      const orderPayload = updatedList.map(dm => ({
+        dm_id: dm.dm_id,
+        sort_order: dm.sort_order || 0,
+        pinned_sort_order: dm.pinned_sort_order || 0
+      }));
+      
+      await axios.post("/api/dm/reorder", { 
+        order: orderPayload 
+      }, { withCredentials: true });
+    } catch (err) {
+      console.error("Failed to save DM order:", err);
+    }
+    
+    setDraggingDm(null);
+    setDragOverDm(null);
+    setDragSection(null);
+  };
+
+  // Drag end (cleanup)
+  const handleDragEnd = () => {
+    setDraggingDm(null);
+    setDragOverDm(null);
+    setDragSection(null);
   };
 
   function toggleProfileMenu() {
@@ -701,13 +982,13 @@ export default function DmPage() {
                             <div className="bcord-invitation-actions">
                               <button
                                 className="bcord-invitation-accept"
-                                onClick={() => handleAcceptInvitation(inv.server_id)}
+                                onClick={() => handleAcceptInvitation(inv.id, inv.server_id)}
                               >
                                 ✓
                               </button>
                               <button
                                 className="bcord-invitation-decline"
-                                onClick={() => handleDeclineInvitation(inv.server_id)}
+                                onClick={() => handleDeclineInvitation(inv.id)}
                               >
                                 ✗
                               </button>
@@ -795,6 +1076,7 @@ export default function DmPage() {
                     title={server.name}
                   >
                     <div className="initials">{server.initials}</div>
+                    {unreadServers[server.id] && <div className="server-unread-dot" />}
                   </button>
                 ))}
                 
@@ -819,29 +1101,67 @@ export default function DmPage() {
                     No conversations yet
                   </div>
                 ) : (
-                  dmList.map((dm) => (
-                    <button
-                      key={dm.dm_id}
-                      className={`bcord-chat-room-item ${selectedDmId === dm.dm_id ? 'active' : ''}`}
-                      onClick={() => selectDm(dm)}
-                    >
-                      <div className="bcord-chat-room-content">
-                        {dm.has_unread && selectedDmId !== dm.dm_id && <span className="dm-user-unread-dot" />}
-                        <span className="hash">@</span>
-                        <span className="label">{dm.other_username || "Unknown"}</span>
-                        {onlineUsers.includes(dm.other_username) && (
-                          <span style={{ 
-                            display: 'inline-block', 
-                            width: '8px', 
-                            height: '8px', 
-                            background: '#22c55e', 
-                            borderRadius: '50%', 
-                            marginLeft: '6px' 
-                          }} />
-                        )}
-                      </div>
-                    </button>
-                  ))
+                  <>
+                    {/* Pinned Section */}
+                    {dmList.some(dm => dm.is_pinned) && (
+                      <>
+                        <div className="dm-section-header">📌 PINNED</div>
+                        {dmList.filter(dm => dm.is_pinned).sort((a,b) => (a.pinned_sort_order || 0) - (b.pinned_sort_order || 0)).map((dm) => (
+                          <div
+                            key={dm.dm_id}
+                            className={`bcord-chat-room-item ${selectedDmId === dm.dm_id ? 'active' : ''} ${draggingDm?.dm_id === dm.dm_id ? 'dragging' : ''} ${dragOverDm?.dm_id === dm.dm_id ? 'drag-over' : ''}`}
+                            onClick={() => selectDm(dm)}
+                            onContextMenu={(e) => handleDmContextMenu(e, dm)}
+                            draggable
+                            onDragStart={(e) => handleDragStart(e, dm, 'pinned')}
+                            onDragOver={(e) => handleDragOver(e, dm)}
+                            onDragEnd={handleDragEnd}
+                            onDragLeave={handleDragLeave}
+                            onDrop={(e) => handleDrop(e, dm)}
+                          >
+                            <div className="bcord-chat-room-content">
+                              {dm.has_unread && selectedDmId !== dm.dm_id && <span className="dm-user-unread-dot" />}
+                              <span className="hash">📌</span>
+                              <span className="label">{dm.other_username || "Unknown"}</span>
+                              {onlineUsers.includes(dm.other_username) && (
+                                <span style={{ display: 'inline-block', width: '8px', height: '8px', background: '#22c55e', borderRadius: '50%', marginLeft: '6px' }} />
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    
+                    {/* Normal Section */}
+                    {dmList.some(dm => !dm.is_pinned) && (
+                      <>
+                        {dmList.some(dm => dm.is_pinned) && <div className="dm-section-header">💬 ALL MESSAGES</div>}
+                        {dmList.filter(dm => !dm.is_pinned).sort((a,b) => (a.sort_order || 0) - (b.sort_order || 0)).map((dm) => (
+                          <div
+                            key={dm.dm_id}
+                            className={`bcord-chat-room-item ${selectedDmId === dm.dm_id ? 'active' : ''} ${draggingDm?.dm_id === dm.dm_id ? 'dragging' : ''} ${dragOverDm?.dm_id === dm.dm_id ? 'drag-over' : ''}`}
+                            onClick={() => selectDm(dm)}
+                            onContextMenu={(e) => handleDmContextMenu(e, dm)}
+                            draggable
+                            onDragStart={(e) => handleDragStart(e, dm, 'normal')}
+                            onDragOver={(e) => handleDragOver(e, dm)}
+                            onDragEnd={handleDragEnd}
+                            onDragLeave={handleDragLeave}
+                            onDrop={(e) => handleDrop(e, dm)}
+                          >
+                            <div className="bcord-chat-room-content">
+                              {dm.has_unread && selectedDmId !== dm.dm_id && <span className="dm-user-unread-dot" />}
+                              <span className="hash">@</span>
+                              <span className="label">{dm.other_username || "Unknown"}</span>
+                              {onlineUsers.includes(dm.other_username) && (
+                                <span style={{ display: 'inline-block', width: '8px', height: '8px', background: '#22c55e', borderRadius: '50%', marginLeft: '6px' }} />
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -1112,6 +1432,27 @@ export default function DmPage() {
         isOpen={showFriendsModal} 
         onClose={() => setShowFriendsModal(false)} 
       />
+
+      {/* DM Context Menu */}
+      {dmContextMenu.visible && (
+        <div 
+          className="dm-context-menu"
+          style={{ 
+            position: 'fixed', 
+            top: dmContextMenu.y, 
+            left: dmContextMenu.x,
+            zIndex: 10001
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button className="context-menu-item" onClick={handlePinDm}>
+            {dmContextMenu.dm?.is_pinned ? '📌 Unpin' : '📌 Pin to Top'}
+          </button>
+          <button className="context-menu-item context-menu-danger" onClick={handleRemoveDm}>
+            ❌ Remove from DMs
+          </button>
+        </div>
+      )}
     </div>
   );
 }

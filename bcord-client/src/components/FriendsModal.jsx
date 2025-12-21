@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import axios from "axios";
 
 export default function FriendsModal({ isOpen, onClose }) {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("add");
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
@@ -9,12 +11,31 @@ export default function FriendsModal({ isOpen, onClose }) {
   const [pendingRequests, setPendingRequests] = useState([]);
   const [sentRequests, setSentRequests] = useState([]);
   const [friends, setFriends] = useState([]);
+  
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState({
+    visible: false,
+    x: 0,
+    y: 0,
+    friend: null
+  });
 
   useEffect(() => {
     if (isOpen) {
       loadData();
     }
   }, [isOpen]);
+
+  // Close context menu when clicking anywhere
+  useEffect(() => {
+    const handleClick = () => {
+      if (contextMenu.visible) {
+        setContextMenu({ ...contextMenu, visible: false });
+      }
+    };
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, [contextMenu.visible]);
 
   const loadData = async () => {
     try {
@@ -75,6 +96,61 @@ export default function FriendsModal({ isOpen, onClose }) {
       loadData();
     } catch (err) {
       setMessage({ type: "error", text: err.response?.data?.error || "Failed to cancel" });
+    }
+  };
+
+  // Right-click handler for friends
+  const handleContextMenu = (e, friend) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      friend: friend
+    });
+  };
+
+  // Start DM with friend
+  const handleStartDm = async () => {
+    if (!contextMenu.friend) return;
+    
+    try {
+      const res = await axios.post("/api/dm/start", 
+        { other_username: contextMenu.friend }, 
+        { withCredentials: true }
+      );
+      
+      setContextMenu({ ...contextMenu, visible: false });
+      onClose(); // Close the friends modal
+      navigate(`/dm/${res.data.dm_id}`); // Navigate to the DM
+    } catch (err) {
+      setMessage({ type: "error", text: err.response?.data?.error || "Failed to start DM" });
+      setContextMenu({ ...contextMenu, visible: false });
+    }
+  };
+
+  // Remove friend
+  const handleRemoveFriend = async () => {
+    if (!contextMenu.friend) return;
+    
+    if (!window.confirm(`Remove ${contextMenu.friend} from your friends?`)) {
+      setContextMenu({ ...contextMenu, visible: false });
+      return;
+    }
+    
+    try {
+      await axios.post("/api/friends/remove", 
+        { username: contextMenu.friend }, 
+        { withCredentials: true }
+      );
+      
+      setMessage({ type: "success", text: `${contextMenu.friend} removed from friends` });
+      setContextMenu({ ...contextMenu, visible: false });
+      loadData(); // Refresh the friends list
+    } catch (err) {
+      setMessage({ type: "error", text: err.response?.data?.error || "Failed to remove friend" });
+      setContextMenu({ ...contextMenu, visible: false });
     }
   };
 
@@ -215,13 +291,17 @@ export default function FriendsModal({ isOpen, onClose }) {
                 <p className="friends-empty">No friends yet. Add some!</p>
               ) : (
                 friends.map((friend, idx) => (
-                  <div key={idx} className="friends-request-item">
+                  <div 
+                    key={idx} 
+                    className="friends-request-item friend-item-clickable"
+                    onContextMenu={(e) => handleContextMenu(e, friend)}
+                  >
                     <div className="friends-request-avatar">
                       {friend.slice(0, 2).toUpperCase()}
                     </div>
                     <div className="friends-request-info">
                       <div className="friends-request-name">{friend}</div>
-                      <div className="friends-request-subtitle">Friend</div>
+                      <div className="friends-request-subtitle">Friend · Right-click for options</div>
                     </div>
                   </div>
                 ))
@@ -230,6 +310,27 @@ export default function FriendsModal({ isOpen, onClose }) {
           )}
         </div>
       </div>
+
+      {/* Context Menu */}
+      {contextMenu.visible && (
+        <div 
+          className="friend-context-menu"
+          style={{ 
+            position: 'fixed', 
+            top: contextMenu.y, 
+            left: contextMenu.x,
+            zIndex: 10001
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button className="context-menu-item" onClick={handleStartDm}>
+            💬 Add to DMs
+          </button>
+          <button className="context-menu-item context-menu-danger" onClick={handleRemoveFriend}>
+            ❌ Remove Friend
+          </button>
+        </div>
+      )}
     </div>
   );
 }
